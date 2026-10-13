@@ -12,6 +12,7 @@ dependencies = [
     "scipy",
     "httpx",
     "structlog",
+    "pydantic-ai-slim[openai]>=2.55.0",
 ]
 
 [dependency-groups]
