@@ -16,8 +16,8 @@ from hypothesis import strategies as st
 from alphalab.domain.pit import (
     KnowledgeDate,
     PITRecord,
-    visible_records,
 )
+from alphalab.domain.pit.filter import _visible_records
 from alphalab.domain.types import Ticker
 
 # A bounded calendar window keeps generated dates realistic and fast to shrink.
@@ -51,7 +51,7 @@ def test_filter_never_leaks_future_knowledge(records: list[PITRecord], knowledge
     kd = KnowledgeDate(knowledge)
 
     # Act
-    visible = list(visible_records(records, kd))
+    visible = list(_visible_records(records, kd))
 
     # Assert — the central invariant: nothing observed after T is visible at T.
     assert all(record.observed_at <= knowledge for record in visible)
@@ -65,7 +65,7 @@ def test_filter_is_a_subset_preserving_all_visible(
     kd = KnowledgeDate(knowledge)
 
     # Act
-    visible = list(visible_records(records, kd))
+    visible = list(_visible_records(records, kd))
 
     # Assert — exactly the knowable records, no more and no fewer.
     expected = [r for r in records if r.observed_at <= knowledge]

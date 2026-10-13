@@ -11,8 +11,8 @@ from alphalab.domain.pit import (
     LeakageError,
     PITRecord,
     UnregisteredFeatureError,
-    visible_records,
 )
+from alphalab.domain.pit.filter import _visible_records
 from alphalab.domain.types import Ticker
 
 
@@ -114,7 +114,7 @@ class TestVisibleRecords:
         )
 
         # Act
-        visible = list(visible_records([early, late], KnowledgeDate(date(2008, 10, 1))))
+        visible = list(_visible_records([early, late], KnowledgeDate(date(2008, 10, 1))))
 
         # Assert
         assert visible == [early]
@@ -130,7 +130,7 @@ class TestVisibleRecords:
         )
 
         # Act
-        visible = list(visible_records([boundary], KnowledgeDate(date(2008, 10, 1))))
+        visible = list(_visible_records([boundary], KnowledgeDate(date(2008, 10, 1))))
 
         # Assert
         assert visible == [boundary]

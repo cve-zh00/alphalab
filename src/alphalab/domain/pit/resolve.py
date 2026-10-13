@@ -5,7 +5,7 @@ strategy consumes must pass through :func:`resolve_feature`, and that function
 raises :class:`LeakageError` the instant a datum is requested that was not yet
 publicly knowable at the active :class:`KnowledgeDate`.
 
-Why a raising gate and not just the silent :func:`visible_records` filter?
+Why a raising gate and not just the silent :func:`_visible_records` filter?
 Because the acid test needs look-ahead to be **inexpressible**, not merely
 filtered away. A silent filter lets a careless caller *believe* it read a
 value when in fact the row was withheld; a raising gate makes the illegal read
