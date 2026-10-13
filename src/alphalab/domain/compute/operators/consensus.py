@@ -1,0 +1,115 @@
+"""Consensus aggregation across independent valuation methods.
+
+Given several :class:`~alphalab.domain.compute.provenance.ProvenancedValue`
+estimates produced by different methods (DCF, DDM, multiples, ...), compute a
+central point and the surrounding range. The result exposes the **relative
+span** so the downstream contract gate (Task 7) can decide — *without
+recomputing anything* — whether the methods agree closely enough to report a
+single point, or diverge so much that it must degrade to a range.
+
+All constituent estimates become parents of the consensus node, so the full
+derivation of every method flows into the aggregate and remains traceable to
+the leaves.
+
+Pure: numpy only, no I/O, no state.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+import numpy as np
+from pydantic import BaseModel, ConfigDict
+
+from alphalab.domain.compute.errors import InvalidValuationInputError
+from alphalab.domain.compute.provenance import ProvenancedValue, combine
+from alphalab.domain.compute.thresholds import CONSENSUS_WIDE_SPAN_THRESHOLD
+
+_CONSENSUS_VERSION = "1.0.0"
+
+
+class ConsensusRange(BaseModel):
+    """Immutable summary of a cross-method valuation consensus.
+
+    Attributes:
+        point: The central (median) estimate, carrying the full provenance of
+            all constituent methods as parents.
+        low: Minimum across methods.
+        mid: Median across methods (equals ``point.value``).
+        high: Maximum across methods.
+        relative_span: ``(high - low) / |mid|`` — the dispersion measure the
+            gate thresholds on. Zero when all methods agree.
+        is_wide: ``True`` when ``relative_span`` exceeds the calibrated
+            :data:`CONSENSUS_WIDE_SPAN_THRESHOLD`; the gate should then prefer a
+            range over a point.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    point: ProvenancedValue
+    low: float
+    mid: float
+    high: float
+    relative_span: float
+    is_wide: bool
+
+
+def consensus(
+    *,
+    estimates: Sequence[ProvenancedValue],
+    unit: str,
+) -> ConsensusRange:
+    """Aggregate several method estimates into a central point and a range.
+
+    Args:
+        estimates: Non-empty sequence of provenanced estimates, expected to all
+            share ``unit``. A unit mismatch is rejected — mixing units here is
+            exactly the calibre error the audit layer guards against.
+        unit: The common unit the estimates must share.
+
+    Returns:
+        A frozen :class:`ConsensusRange` whose ``point`` has every estimate as a
+        parent.
+
+    Raises:
+        InvalidValuationInputError: on an empty set or a unit mismatch.
+    """
+    if len(estimates) == 0:
+        raise InvalidValuationInputError("estimates must be non-empty")
+    for est in estimates:
+        if est.unit != unit:
+            raise InvalidValuationInputError(
+                f"estimate from '{est.operator}' has unit '{est.unit}', expected '{unit}'"
+            )
+
+    values = np.asarray([e.value for e in estimates], dtype=float)
+    low = float(np.min(values))
+    high = float(np.max(values))
+    mid = float(np.median(values))
+
+    denom = abs(mid)
+    relative_span = (high - low) / denom if denom > 0.0 else 0.0
+    is_wide = relative_span > CONSENSUS_WIDE_SPAN_THRESHOLD
+
+    point = combine(
+        value=mid,
+        operator="consensus",
+        version=_CONSENSUS_VERSION,
+        unit=unit,
+        parents=tuple(estimates),
+        extra_inputs={
+            "n_methods": float(len(estimates)),
+            "low": low,
+            "high": high,
+            "relative_span": relative_span,
+        },
+    )
+
+    return ConsensusRange(
+        point=point,
+        low=low,
+        mid=mid,
+        high=high,
+        relative_span=relative_span,
+        is_wide=is_wide,
+    )
