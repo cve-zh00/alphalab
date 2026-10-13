@@ -480,3 +480,78 @@ d462af9  feat: modelo de costes con impacto no-lineal y stressed stop
 a69e406  feat: capa de datos point-in-time con invariante anti-leakage
 64686fb  chore: scaffold alphalab con gates de calidad y test de arquitectura
 ```
+
+---
+
+## 11. Estado de implementación — Fases 1-5 (2026-10-13)
+
+`make check`: 664 passed + 3 skipped, 96.58% cobertura, mypy strict 99 archivos, ruff limpio.
+`make acid-test`: 6 passed. 18 commits.
+
+### Lo construido
+
+| Módulo | Qué hace |
+|---|---|
+| `domain/compute/` | `ProvenancedValue` como DAG inmutable; DCF, WACC, DDM, múltiplos, EV bridge, consensus; 5 operadores de auditoría |
+| `domain/contract/` + `artifact/` | 7 cláusulas puras con **value-withhold**; `save()` es el único camino de escritura |
+| `domain/skeptic/` | 8 criterios deterministas S1-S8; evalúa todos sin cortocircuito; nunca lanza |
+| `domain/journal/` | settle-then-reflect; Brier, ECE, reliability diagram, sobreconfianza con signo |
+| `domain/analyst/` + `adapters/llm.py` | PydanticAI con `ToolOutput`; dos tiers; ningún número del modelo |
+| `domain/debate/` | Router de turnos de tope duro; aislamiento de contexto por rol |
+| `domain/schedule/` + `obs/` | Cuatro cadencias con launchd; calendario puro sin `datetime.now()` |
+| `domain/experiment/` | El A/B decisivo con bootstrap pareado y corrección de Bonferroni |
+
+### Hallazgo: el gate PBO era un lanzamiento de moneda
+
+Bajo la hipótesis nula, el rank out-of-sample de la mejor configuración in-sample es
+uniforme, así que **E[PBO] ≈ 0.5 — el umbral era el valor nulo**. Ruido puro sin edge
+atravesaba el gate:
+
+| escenario | PBO | IC sup | p-valor | gate viejo | gate nuevo |
+|---|---|---|---|---|---|
+| 100 GBM independientes (sin edge) | 0.4239 | 0.4316 | 0.3250 | **pasaba** | rechaza |
+| familia con factor común (sin edge) | 0.3949 | 0.4030 | 0.2500 | **pasaba** | rechaza |
+| señal genuina estable | 0.0197 | 0.0224 | 0.0000 | pasa | pasa |
+| SPY pasivo (N=1) | 0.0000 | 0.0000 | 0.0000 | pasa | pasa |
+
+Triple criterio nuevo: punto < 0.25, límite superior del IC bootstrap < 0.25, y
+p-valor < 0.05 contra la nula simulada.
+
+### El experimento A/B — resultado negativo, reportado tal cual
+
+n_oos = 20, datos GBM sin edge, dobles deterministas:
+
+| brazo | Sharpe gross | Sharpe net | maxDD | propuestas | ejecutadas | DSR | Brier |
+|---|---|---|---|---|---|---|---|
+| A: agente único | 0.380 | −0.622 | −0.034 | 20 | 20 | 0.433 | 0.263 |
+| B: debate bull/bear/judge | 0.380 | −0.622 | −0.034 | 20 | 20 | 0.433 | 0.263 |
+| C: debate + escéptico | 0.000 | 0.000 | 0.000 | 20 | **0** | 1.000 | 0.263 |
+
+- **Debate vs agente único**: Δ Sharpe = 0.0000, IC [0, 0]. **No mejora.**
+- **Escéptico**: vetó 20 de 20. Pero de esos, **10 habrían ganado y 10 habrían perdido** —
+  no discriminó, simplemente dejó de operar. IC de la diferencia [−0.5371, +0.7076]
+  incluye cero.
+- **Potencia**: Δ Sharpe mínimo detectable = 1.0236, absurdamente grande. El veredicto es
+  **INCONCLUSIVE por falta de potencia**, explícitamente distinguido de
+  INDISTINGUISHABLE (empate real).
+
+Corrección de Bonferroni sobre 3 pares (confianza por comparación 0.9833), y las 3
+comparaciones registradas como ensayos en el trial ledger.
+
+**Qué NO prueba**: corre con dobles deterministas, no con el 27B real — mide arquitectura,
+no habilidad del modelo. Sobre datos sintéticos sin edge. No es evidencia de rentabilidad
+desplegable.
+
+### Interpretación honesta
+
+El Δ = 0 entre A y B es un artefacto del diseño: dobles deterministas producen el mismo
+veredicto direccional por construcción. Mide el cableado, no el debate. Para un veredicto
+real sobre el debate hace falta correr los brazos con el LLM y una muestra mucho mayor —
+y a ~80 s por debate de una ronda, eso son horas de cómputo, no un test.
+
+El hallazgo sobre el escéptico sí es sustantivo y va en contra de nuestro propio diseño:
+**vetar todo no es escepticismo, es abstinencia.** Un gate que rechaza el 100% de los
+candidatos mejora el drawdown trivialmente (no operar nunca tiene drawdown cero) sin
+aportar discriminación. Los umbrales S1-S8 están calibrados para datos sin edge, que es
+justo lo que el experimento les dio. Antes de concluir sobre el escéptico hay que correrlo
+sobre candidatos con edge genuino mezclados con ruido, y medir si separa unos de otros.
