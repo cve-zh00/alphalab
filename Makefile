@@ -20,9 +20,9 @@ typecheck:
 
 check: lint typecheck test
 
-# Acceptance ("acid") tests. Placeholder-safe: overrides pytest addopts so an
-# empty collection (exit code 5) does not fail the target while no acceptance
-# tests exist yet, and skips the coverage gate which is meaningless here.
+# Acceptance ("acid") tests: certify a real passive, reject the leakage oracle
+# and reject best-of-N noise. The global --cov-fail-under gate is meaningless
+# for a partial collection, so coverage is disabled here (--no-cov) WITHOUT
+# touching the gate in `make check`. The target fails if any acid test fails.
 acid-test:
-	$(UV) run pytest -m acceptance -v -o addopts="" -p no:cacheprovider || \
-		test $$? -eq 5
+	$(UV) run pytest -m acceptance -v -p no:cacheprovider --no-cov

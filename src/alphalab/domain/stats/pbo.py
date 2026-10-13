@@ -66,18 +66,32 @@ def probability_of_backtest_overfitting(
 
     Returns:
         PBO in ``[0, 1]``: the fraction of symmetric partitions where the best
-        IS configuration ranks below the OOS median.
+        IS configuration ranks below the OOS median. For a single
+        configuration (``N == 1``) there is no selection, so PBO is ``0.0`` by
+        definition (see the inline note).
 
     Raises:
-        ValueError: On a non-2D matrix, fewer than two configurations, an odd
-            or out-of-range ``n_strips``.
+        ValueError: On a non-2D matrix, zero configurations, an odd or
+            out-of-range ``n_strips`` (only checked when ``N >= 2``).
     """
     matrix = np.asarray(returns, dtype=np.float64)
     if matrix.ndim != 2:
         raise ValueError("returns must be a 2D (T x N) matrix")
     n_periods, n_configs = matrix.shape
-    if n_configs < 2:
-        raise ValueError("need at least two configurations")
+    if n_configs < 1:
+        raise ValueError("need at least one configuration")
+    if n_configs == 1:
+        # Degenerate single-configuration case. CSCV measures overfitting *from
+        # selection*: it asks whether the best IS configuration keeps its rank
+        # OOS. With exactly one configuration there is nothing to select
+        # between, so selection-driven overfitting is structurally impossible
+        # and PBO is 0 by definition. This is an a-priori hypothesis (e.g. a
+        # passive benchmark), not the survivor of a search, so returning 0.0 is
+        # the honest answer rather than an error or a meaningless logit. This
+        # is a deliberate decision, documented here so N=1 cannot certify by
+        # accident: the DSR and bootstrap-CI gates still have to pass on their
+        # own merits.
+        return 0.0
     if n_strips < 2 or n_strips % 2 != 0:
         raise ValueError("n_strips must be an even integer >= 2")
     if n_strips > n_periods:

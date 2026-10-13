@@ -16,6 +16,7 @@ from alphalab.domain.pit.errors import (
 from alphalab.domain.pit.features import FeatureRegistry, FeatureSpec
 from alphalab.domain.pit.filter import visible_records
 from alphalab.domain.pit.records import KnowledgeDate, PITRecord
+from alphalab.domain.pit.resolve import resolve_feature
 
 __all__ = [
     "FeatureRegistry",
@@ -25,5 +26,6 @@ __all__ = [
     "PITError",
     "PITRecord",
     "UnregisteredFeatureError",
+    "resolve_feature",
     "visible_records",
 ]

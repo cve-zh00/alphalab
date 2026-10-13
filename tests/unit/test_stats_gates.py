@@ -66,9 +66,25 @@ class TestPBO:
         with pytest.raises(ValueError, match="even integer"):
             probability_of_backtest_overfitting(matrix, n_strips=7)
 
-    def test_single_configuration_raises(self) -> None:
+    def test_single_configuration_returns_zero(self) -> None:
+        # With exactly one configuration there is no selection, so CSCV
+        # selection-overfitting is structurally impossible: PBO is 0.0 by
+        # definition. This is the honest answer for an a-priori hypothesis
+        # (e.g. a passive benchmark), not an error. Documented decision in
+        # ``pbo.py``.
         matrix = np.random.default_rng(0).normal(size=(100, 1))
-        with pytest.raises(ValueError, match="at least two configurations"):
+        pbo = probability_of_backtest_overfitting(matrix, n_strips=4)
+        assert pbo == 0.0
+
+    def test_single_configuration_ignores_strip_count(self) -> None:
+        # The N=1 short-circuit happens before any strip validation, so an
+        # otherwise-invalid odd strip count is irrelevant for one config.
+        matrix = np.random.default_rng(1).normal(size=(50, 1))
+        assert probability_of_backtest_overfitting(matrix, n_strips=7) == 0.0
+
+    def test_zero_configurations_raises(self) -> None:
+        matrix = np.random.default_rng(0).normal(size=(100, 0))
+        with pytest.raises(ValueError, match="at least one configuration"):
             probability_of_backtest_overfitting(matrix, n_strips=4)
 
 
