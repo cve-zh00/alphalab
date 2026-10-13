@@ -427,3 +427,56 @@ reference/hypergrok/                   # modelo de gobernanza y aprobación
 
 **Disclaimer:** documento de investigación técnica. No es asesoría financiera ni recomendación
 de operar. Los futuros perpetuos pueden liquidar una cuenta.
+
+---
+
+## 10. Estado de implementación — Fase 0 completa (2026-10-13)
+
+Harness de evaluación honesta implementado y verificado. `make check`: 206 tests,
+95.60% cobertura, ruff + mypy strict verdes. `make acid-test`: 5 passed.
+
+### Resultados de la prueba ácida
+
+| Criterio | Resultado | Valores |
+|---|---|---|
+| Certifica SPY B&H 2010-2024 (T=3773) | ✅ CERTIFICADO | SR_ann 0.8374 (ref. paper 0.85), DSR 0.9993, PBO 0.0, IC [0.0194, 0.0843] |
+| Rechaza oráculo con leakage (estructural) | ✅ RECHAZADO | `LeakageError` desde `domain/pit/resolve.py` |
+| Gates estadísticos ciegos al leakage (esperado) | ✅ DOCUMENTADO | SR_ann ~20.2, DSR 1.000000, PBO 0.0 → certifica fraude |
+| Rechaza best-of-100 ruido GBM | ✅ RECHAZADO | SR_ann 1.8543, DSR 0.5538 < 0.95 |
+
+### Verificaciones adversariales
+
+**Mutation test del gate de leakage.** Neutralizando el `raise` en `resolve.py`, la
+prueba ácida falla (`DID NOT RAISE LeakageError`); restaurado, vuelve a verde. El test
+tiene dientes, no es decorativo.
+
+**El trial ledger es load-bearing.** El mismo ruido GBM sin edge (SR_ann 1.8543):
+
+| `n_trials` declarado | DSR | PBO | IC excl. 0 | Veredicto |
+|---|---|---|---|---|
+| 1 (deshonesto) | 0.9952 | 0.4239 | sí | **CERTIFICA — falso positivo** |
+| 10 (subcontado) | 0.8560 | 0.4239 | sí | rechaza |
+| 100 (honesto) | 0.5538 | 0.4239 | sí | rechaza |
+
+PBO y el IC bootstrap **pasan en los tres casos**. Solo el DSR alimentado con el conteo
+honesto atrapa el overfit. Esto confirma empíricamente por qué el ledger no es
+contabilidad decorativa: subcontar ensayos convierte ruido en descubrimiento.
+
+### Limitación conocida (resolver en Fase 2)
+
+`resolve_feature` es el camino sancionado y lanza `LeakageError`, pero **nada fuerza
+todavía a una estrategia a usarlo** — `visible_records` filtra en silencio y sigue
+accesible. Cuando existan estrategias reales (Fases 2-3) hay que cablear
+`resolve_feature` como único acceso a features, idealmente con un test de arquitectura
+que lo imponga mecánicamente, igual que el guard de pureza del dominio.
+
+### Commits
+
+```
+d350b59  test: prueba acida del harness - certifica pasivo, rechaza leakage y ruido
+43483fb  feat: gates estadisticos DSR, PBO via CSCV y bootstrap IC
+9d605a6  feat: trial ledger append-only con hash canonico de especificacion
+d462af9  feat: modelo de costes con impacto no-lineal y stressed stop
+a69e406  feat: capa de datos point-in-time con invariante anti-leakage
+64686fb  chore: scaffold alphalab con gates de calidad y test de arquitectura
+```
