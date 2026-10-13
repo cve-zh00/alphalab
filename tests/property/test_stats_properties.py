@@ -22,6 +22,7 @@ from alphalab.domain.stats.deflated_sharpe import (
     expected_max_sharpe,
 )
 from alphalab.domain.stats.pbo import probability_of_backtest_overfitting
+from alphalab.domain.stats.pbo_gate import evaluate_pbo_gate
 from alphalab.domain.stats.synthetic import gbm_return_matrix
 
 _finite = {"allow_nan": False, "allow_infinity": False}
@@ -113,3 +114,44 @@ def test_pbo_in_unit_interval(seed: int) -> None:
     pbo = probability_of_backtest_overfitting(matrix, n_strips=6)
     # Assert
     assert 0.0 <= pbo <= 1.0
+
+
+@given(seed=st.integers(min_value=0, max_value=2**32 - 1))
+@settings(max_examples=40, deadline=None)
+def test_pbo_gate_point_and_ci_in_unit_interval(seed: int) -> None:
+    # Arrange: a random edgeless configuration matrix.
+    rng = np.random.default_rng(seed)
+    matrix = gbm_return_matrix(rng=rng, n_periods=96, n_configs=6, sigma=0.02)
+    # Act: run the hardened gate with cheap budgets.
+    result = evaluate_pbo_gate(
+        matrix,
+        rng=np.random.default_rng(seed + 1),
+        n_strips=6,
+        n_bootstrap=200,
+        n_null_sims=20,
+    )
+    # Assert: the point, both CI endpoints and the p-value stay in [0, 1].
+    assert 0.0 <= result.pbo <= 1.0
+    assert 0.0 <= result.ci_lower <= 1.0
+    assert 0.0 <= result.ci_upper <= 1.0
+    assert 0.0 <= result.p_value <= 1.0
+
+
+@given(seed=st.integers(min_value=0, max_value=2**32 - 1))
+@settings(max_examples=40, deadline=None)
+def test_pbo_gate_ci_contains_point_estimate(seed: int) -> None:
+    # Arrange
+    rng = np.random.default_rng(seed)
+    matrix = gbm_return_matrix(rng=rng, n_periods=96, n_configs=6, sigma=0.02)
+    # Act
+    result = evaluate_pbo_gate(
+        matrix,
+        rng=np.random.default_rng(seed + 1),
+        n_strips=6,
+        n_bootstrap=200,
+        n_null_sims=20,
+    )
+    # Assert: the percentile bootstrap CI brackets its own point estimate
+    # (small tolerance for the discrete quantile grid).
+    assert result.ci_lower <= result.pbo + 1e-9
+    assert result.pbo <= result.ci_upper + 1e-9

@@ -51,24 +51,42 @@ from alphalab.domain.stats.deflated_sharpe import (
     deflated_sharpe_ratio,
     expected_max_sharpe,
 )
-from alphalab.domain.stats.pbo import probability_of_backtest_overfitting
+from alphalab.domain.stats.pbo import (
+    partition_logits,
+    probability_of_backtest_overfitting,
+)
+from alphalab.domain.stats.pbo_gate import (
+    PBO_POINT_THRESHOLD,
+    PBO_PVALUE_THRESHOLD,
+    PBOGateResult,
+    PBONullStats,
+    evaluate_pbo_gate,
+    pbo_null_distribution,
+)
 from alphalab.domain.stats.synthetic import gbm_log_returns, gbm_return_matrix
 
 __all__ = [
     "DSR_THRESHOLD",
+    "PBO_POINT_THRESHOLD",
+    "PBO_PVALUE_THRESHOLD",
     "PBO_THRESHOLD",
     "BootstrapCI",
     "CertificationResult",
     "EvaporationCurve",
+    "PBOGateResult",
+    "PBONullStats",
     "autocorrelation",
     "bootstrap_sharpe_ci",
     "certify_strategy",
     "deflated_sharpe_ratio",
     "effective_sample_size",
+    "evaluate_pbo_gate",
     "expected_max_sharpe",
     "gbm_log_returns",
     "gbm_return_matrix",
     "kurtosis_non_central",
+    "partition_logits",
+    "pbo_null_distribution",
     "probability_of_backtest_overfitting",
     "sharpe_ratio",
     "skewness",

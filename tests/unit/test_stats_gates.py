@@ -87,6 +87,26 @@ class TestPBO:
         with pytest.raises(ValueError, match="at least one configuration"):
             probability_of_backtest_overfitting(matrix, n_strips=4)
 
+    def test_partition_logits_reconstruct_pbo(self) -> None:
+        # The public PBO is exactly ``(partition_logits < 0).mean()``; the
+        # vectorized helper must reproduce the scalar it feeds.
+        from alphalab.domain.stats.pbo import partition_logits
+
+        rng = np.random.default_rng(17)
+        matrix = rng.normal(0.0, 0.01, size=(160, 8))
+        logits = partition_logits(matrix, n_strips=8)
+        assert logits.ndim == 1
+        assert logits.size > 0
+        pbo_direct = probability_of_backtest_overfitting(matrix, n_strips=8)
+        assert float((logits < 0.0).mean()) == pytest.approx(pbo_direct)
+
+    def test_partition_logits_requires_two_configs(self) -> None:
+        from alphalab.domain.stats.pbo import partition_logits
+
+        matrix = np.random.default_rng(0).normal(size=(100, 1))
+        with pytest.raises(ValueError, match="two configurations"):
+            partition_logits(matrix, n_strips=4)
+
 
 class TestEffectiveSampleSize:
     def test_positive_autocorrelation_shrinks_t_eff(self) -> None:
