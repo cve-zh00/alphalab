@@ -1,0 +1,37 @@
+# Repos de referencia clonados (no se versionan: 70MB)
+reference/
+
+# Secretos — NUNCA versionar
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+config.ini
+
+# Datos de mercado (se regeneran desde los providers)
+data/
+*.parquet
+*.duckdb
+*.db
+*.sqlite3
+
+# Artefactos de runs
+runs/
+artifacts/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+
+# macOS
+.DS_Store

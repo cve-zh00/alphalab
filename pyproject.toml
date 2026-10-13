@@ -1,0 +1,56 @@
+[project]
+name = "alphalab"
+version = "0.1.0"
+description = "Alphalab research and backtesting lab"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2",
+    "pydantic-settings",
+    "duckdb",
+    "pyarrow",
+    "numpy",
+    "scipy",
+    "httpx",
+    "structlog",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "hypothesis",
+    "ruff",
+    "mypy",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/alphalab"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=alphalab --cov-report=term-missing --cov-fail-under=80"
+markers = [
+    "acceptance: end-to-end acceptance tests (acid tests)",
+]
+
+[tool.coverage.run]
+source = ["src/alphalab"]
