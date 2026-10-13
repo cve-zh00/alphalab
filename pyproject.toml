@@ -35,6 +35,13 @@ python_version = "3.12"
 strict = true
 files = ["src"]
 
+# Third-party scientific/IO libraries that ship no type stubs. Ignoring their
+# missing imports does not relax strictness on our own code; it only stops
+# mypy from erroring on libraries it cannot introspect.
+[[tool.mypy.overrides]]
+module = ["pyarrow.*", "scipy.*"]
+ignore_missing_imports = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
