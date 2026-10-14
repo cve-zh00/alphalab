@@ -17,10 +17,15 @@ from __future__ import annotations
 
 import io
 import json
+from datetime import date, timedelta
 from pathlib import Path
 
 from alphalab.adapters.journal_sqlite import SqliteJournal
 from alphalab.cli import main
+from alphalab.cli.commands.predict import DEFAULT_HORIZON_DAYS
+
+#: Far-future knowledge date, so the anti-leakage gate never fires in tests.
+_KNOWLEDGE_DATE = date(2099, 1, 1)
 
 
 def _run(argv: list[str]) -> tuple[int, str, str]:
@@ -58,8 +63,9 @@ class TestPredictRegisters:
         assert code == 0, err
         assert "REGISTERED" in out
         assert "AAPL" in out
-        # The settlement date is knowledge_date + 90 days.
-        assert "2099-04-01" in out
+        # This case passes --horizon-days explicitly, so the expected date is
+        # derived from that override rather than from the default.
+        assert (_KNOWLEDGE_DATE + timedelta(days=90)).isoformat() in out
         journal = SqliteJournal(tmp_path / "journal.db")
         try:
             assert len(journal.list_predictions()) == 1
@@ -117,7 +123,11 @@ class TestPredictRegisters:
         assert payload["ticker"] == "AAPL"
         assert 0.0 <= payload["probability"] <= 1.0
         assert payload["direction"] == "up"
-        assert payload["horizon"] == "2099-04-01"
+        # Derived from the constant, not hardcoded: the default horizon is a
+        # tuning decision that changes as calibration needs dictate, and a
+        # literal date here would fail the build for a legitimate change.
+        expected = _KNOWLEDGE_DATE + timedelta(days=DEFAULT_HORIZON_DAYS)
+        assert payload["horizon"] == expected.isoformat()
 
 
 class TestPredictAbstains:

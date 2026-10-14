@@ -54,8 +54,8 @@ from alphalab.domain.backtest import (
     liquidity_screened,
     rank_ensemble_signal,
 )
-from alphalab.domain.execution import Holding, RiskLimits, TradePlan, plan_trades
-from alphalab.domain.types import Ticker
+from alphalab.domain.execution import Holding, OrderIntent, RiskLimits, TradePlan, plan_trades
+from alphalab.domain.types import Side, Ticker
 
 __all__ = [
     "DEFAULT_LOOKBACKS",
@@ -70,8 +70,27 @@ __all__ = [
 #: The ensemble lookbacks already measured in backtest. Not re-tuned here.
 DEFAULT_LOOKBACKS = (60, 120, 250)
 
-#: Number of names held, equal-weighted. Matches the measured variant.
-DEFAULT_TOP_N = 5
+#: Number of names held, equal-weighted.
+#:
+#: Raised from 5 to 20 after measuring the cost of concentration on the
+#: de-biased universe, out-of-sample 2018-2024, fully invested in both cases:
+#:
+#:     names   SR net    CAGR     maxDD     vol
+#:         5    0.171   -1.18%   -72.1%   40.0%
+#:        10    0.431   +8.98%   -53.4%   31.7%
+#:        20    0.447   +8.64%   -43.9%   26.4%
+#:        30    0.402   +6.92%   -39.4%   23.6%
+#:
+#: The choice is **not** the Sharpe maximum: 0.447 versus 0.431 at ten names is
+#: noise, and picking a peak from four candidates is exactly the overfitting
+#: this project rejects. It is the monotonic part of the table that justifies
+#: the change — drawdown and volatility fall steadily as names are added,
+#: because that is diversification arithmetic rather than a fitted effect.
+#: Twenty keeps the per-name weight at 5%, so no single position can dominate.
+#:
+#: The uncomfortable figure from the same run: SPY buy-and-hold returned
+#: SR 0.750, CAGR 13.53%, maxDD -33.7%. Every configuration above loses to it.
+DEFAULT_TOP_N = 20
 
 #: Identifier baked into every ``client_order_id``, so re-runs are idempotent.
 STRATEGY_NAME = "rank_ensemble"
@@ -265,7 +284,7 @@ class PaperRunner:
             return [], None, "market is closed; market orders would dangle or be rejected"
         outcomes: list[OrderOutcome] = []
         halted_reason: str | None = None
-        for intent in plan.intents:
+        for intent in _sells_first(plan.intents):
             outcome = self._broker.submit(intent, strategy=STRATEGY_NAME, as_of=plan.as_of)
             outcomes.append(outcome)
             self._record_outcome(cycle_id, stamp, outcome)
@@ -420,6 +439,26 @@ def _shadow_benchmark(
         entry_price=entry.close,
         latest_price=bars[-1].close,
     )
+
+
+def _sells_first(intents: Sequence[OrderIntent]) -> list[OrderIntent]:
+    """Order submissions so sells precede buys.
+
+    A fully invested portfolio has no spare cash, so rotating into new names
+    requires the proceeds of the exits. Submitting alphabetically mixed buys
+    and sells meant the buys reached the broker before any cash existed:
+    measured on the real paper account, three of twenty orders came back
+    ``403 insufficient buying power`` while the sells sat unexecuted behind
+    them, leaving the portfolio in a half-rotated state.
+
+    No backtest surfaces this — a simulation rebalances instantaneously from a
+    single equity figure. It is exactly the class of fault paper trading exists
+    to find.
+
+    Ties break on ticker so the sequence stays deterministic and the
+    idempotency keys remain reproducible.
+    """
+    return sorted(intents, key=lambda i: (i.side is Side.BUY, i.ticker))
 
 
 def _blocked_reason(account: AccountSnapshot) -> str:

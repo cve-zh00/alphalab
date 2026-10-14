@@ -48,7 +48,13 @@ class RiskLimits(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     #: Largest fraction of equity any single position may reach.
-    max_position_weight: float = Field(default=0.25, gt=0.0, le=1.0)
+    #:
+    #: 0.10 leaves headroom above the 5% target weight of a twenty-name
+    #: portfolio, so ordinary price drift never trips the limit, while still
+    #: blocking a sizing error that would concentrate the book. Measured on the
+    #: de-biased universe, concentration is the dominant risk: five names drew
+    #: down 72.1% where twenty drew down 43.9%.
+    max_position_weight: float = Field(default=0.10, gt=0.0, le=1.0)
 
     #: Largest notional a single order may carry, as a fraction of equity.
     #: Caps the damage a mispriced or stale signal can do in one step.

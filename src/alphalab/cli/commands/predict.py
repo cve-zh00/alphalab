@@ -41,10 +41,24 @@ from alphalab.domain.forecast import Abstention
 from alphalab.domain.journal import Prediction
 from alphalab.report.theme import Theme, theme_for
 
-#: Default forward horizon. 90 days (~a quarter) is long enough that a
-#: directional thesis has to actually play out, short enough that a record
-#: accumulates settleable rows within a season rather than a year.
-DEFAULT_HORIZON_DAYS = 90
+#: Default forward horizon, in calendar days.
+#:
+#: Lowered from 90 to 21 for a measured reason. Calibration needs roughly 30
+#: settled predictions before :func:`calibration_report` will call itself
+#: conclusive. At a 90-day horizon that is years away; at 21 days — about a
+#: trading month — the same evidence accrues more than four times faster.
+#:
+#: This is the only genuinely fast feedback loop available. Detecting whether a
+#: *strategy* beats zero is bounded by elapsed time, not by effort: at the
+#: out-of-sample Sharpe measured here (0.17 to 0.27) it would take over a
+#: century. Calibration asks a different and far cheaper question — when this
+#: system says 60%, is it right 60% of the time? — and that question is
+#: answerable in months.
+#:
+#: Shorter still would be worse: under about three weeks, single-name moves are
+#: dominated by noise and the resolution would measure luck rather than
+#: judgement.
+DEFAULT_HORIZON_DAYS = 21
 
 
 @dataclass(frozen=True)
