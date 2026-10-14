@@ -24,6 +24,7 @@ Los únicos tres sobre los que se leyó código fuente. Clonados con
 | `AI4Finance-Foundation/FinRobot` | `2717499` | 2026-09-28 | **Mejor referencia de provenance** y de contract gate. Es de donde sale el patrón "numbers are code-calculated, narratives are LLM-assisted" |
 | `galleonlabs/hypergrok-trading-desk` | `d59364a` | 2026-10-13 | Modelo de **gobernanza**. Documentación y prompts, no software |
 | `HKUDS/AI-Trader` | `d03ff6c` | 2026-06-11 | **No usar como referencia de código** — ver §1.1 |
+| `AI4Finance-Foundation/FinRL` | `8511e7c` | 2026-10-14 | Infraestructura de RL seria y bien licenciada. **Su capa de evaluación no sostiene un claim de despliegue** — ver §6 (análisis en cascada) |
 
 ### 1.1 Auditoría de HKUDS/AI-Trader: el repo no es el paper
 
@@ -71,7 +72,7 @@ idénticos, proyectos distintos.
 | `nautechsystems/nautilus_trader` | 29 927 | LGPL-3.0 | Core event-driven en Rust. **Backtest y live comparten el mismo código** |
 | `QuantConnect/Lean` | 21 984 | Apache-2.0 | Motor C#/Python |
 | `hummingbot/hummingbot` | 20 432 | Apache-2.0 | Capa de ejecución cripto |
-| `AI4Finance-Foundation/FinRL` | 16 637 | MIT | RL financiero |
+| `AI4Finance-Foundation/FinRL` | — | — | **Promovido a §1**: clonado e inspeccionado en código. Ver §6 |
 | `tensortrade-org/tensortrade` | 7 196 | Apache-2.0 | RL, mantenimiento lento |
 | `AI4Finance-Foundation/FinRL-Meta` | 1 949 | MIT | Entornos y datos para RL |
 
@@ -162,3 +163,192 @@ código y no un prompt, y de que el arnés se construyera antes que los agentes.
 
 Lo que **no** se tomó: el modelo de costes de TradingAgents (no tiene) y
 cualquier línea de código de AI-Trader (sin licencia).
+
+---
+
+## 6. Análisis en cascada: AI4Finance-Foundation/FinRL
+
+Commit inspeccionado: **`8511e7c`** (2026-10-14). **21 052 LOC de Python en 99
+archivos.** Licencia **MIT real** (archivo `LICENSE` presente en el árbol y
+confirmado por la API — a diferencia de AI-Trader). 16 638 stars, 3 544 forks,
+307 issues abiertos, push activo.
+
+Análisis por capas, de metadata a código, terminando en una medición propia.
+
+### L1 — Arquitectura
+
+Separación de responsabilidades limpia y legible, en tres capas:
+
+```
+finrl/agents/       adaptadores a librerias de RL (stablebaselines3, elegantrl,
+                    rllib, fasttd3, portfolio_optimization)
+finrl/meta/         entornos Gym, procesadores de datos, preprocesadores,
+                    paper trading
+finrl/applications/ recetas ejecutables (stock_trading, crypto, HFT,
+                    portfolio_allocation, imitation_learning)
+```
+
+Es **infraestructura de investigación en RL**, no un sistema de inversión. Juzgarlo
+como lo segundo sería injusto; pero la pregunta relevante para este proyecto es si
+su capa de evaluación sostiene las conclusiones que la gente extrae de él.
+
+### L2 — El grep crítico (idéntico al aplicado a AI-Trader, para que sea comparable)
+
+| Término | Archivos | | Término | Archivos |
+|---|---|---|---|---|
+| `backtest` | **9** | | `survivorship` | **0** |
+| `turbulence` | **33** | | `slippage` | **0** |
+| `transaction_cost` | 1 | | `deflated` | **0** |
+| `walk_forward` | 0 ⚠️ | | `pbo` | **0** |
+| `point_in_time` | **0** | | `look_ahead` / `lookahead` | **0** |
+
+⚠️ **Corrección en favor de FinRL:** el grep de `walk_forward` da 0 porque lo
+llaman *rolling window*. `finrl/applications/stock_trading/stock_trading_rolling_window.py`
+implementa reentrenamiento rodante real (`rolling_window_length`,
+`calc_train_trade_starts_ends_if_rolling`). **El walk-forward existe.** Mi primer
+grep lo habría declarado ausente por una cuestión de nomenclatura, y habría sido
+un error de auditoría.
+
+A diferencia de AI-Trader (donde `backtest` daba 0), aquí **la capa de backtest
+existe de verdad**. Lo que no existe es la capa de control de overfitting.
+
+### L3 — Modelo de costes: lineal, sin impacto de mercado
+
+```python
+# finrl/meta/env_stock_trading/env_stocktrading.py
+buy_cost_pct: list[float]      # default tipico 1e-3 = 10 bps
+sell_cost_pct: list[float]
+...
+self.cost += price * shares * self.sell_cost_pct[index]
+```
+
+El coste es **estrictamente proporcional al nocional**. Consecuencias:
+
+- **No hay impacto de mercado.** El coste por unidad no crece con el tamaño, lo que
+  equivale a asumir **capacidad infinita**. Duplicar el capital no cuesta más por
+  dólar. Es la aproximación que `domain/costs` de este proyecto existe para corregir,
+  con impacto de raíz cuadrada.
+- **No hay spread ni ADV.** Un nombre ilíquido cuesta lo mismo que uno líquido. Anoche
+  medí lo que eso implica: sin filtro de liquidez, un universo muestreado
+  mecánicamente produjo un equiponderado compuesto a **+430% anual** — bid-ask bounce
+  sobre papeles de centavos, no retorno.
+- No hay borrow para cortos ni comisión mínima.
+
+### L4 — Universo: sesgo de supervivencia hardcodeado
+
+El archivo **más grande del repo** es `finrl/config_tickers.py` (1 480 LOC, 1 414
+líneas con tickers literales). Su contenido:
+
+```python
+# Dow 30 constituents in 2026/03/20
+DOW_30_TICKER = ["AXP", "AMGN", "AMZN", "AAPL", "BA", ...]
+```
+
+Una lista de constituyentes **actuales**, fija, usada para backtests sobre periodos
+históricos — incluida la aplicación de rolling window (línea 52:
+`ticker_list=DOW_30_TICKER`). Es sesgo de supervivencia por construcción: las
+empresas que salieron del índice no están.
+
+Esto no es una objeción teórica. **Lo medí en este proyecto:** mis 48 tickers
+elegidos de memoria batían a SPY en **+7.47% anual sin ninguna señal**. Al
+reemplazarlos por un universo muestreado mecánicamente de la lista completa de la
+SEC, el exceso desapareció (**−5.41%**, es decir por debajo del índice, que es la
+forma esperada de los retornos accionarios). La ventaja de momentum que parecía
+sólida (IR +0.97) se volvió **negativa** (−0.10). El sesgo del universo era toda
+la señal.
+
+### L5 — Crédito donde corresponde: la turbulencia **sí** es point-in-time
+
+Su único control de riesgo está bien implementado en el eje temporal:
+
+```python
+# finrl/meta/preprocessor/preprocessors.py
+hist_price = df_price_pivot[
+    (df_price_pivot.index < unique_date[i])          # estrictamente anterior
+    & (df_price_pivot.index >= unique_date[i - 252]) # ventana rodante de 1 año
+]
+cov_temp = filtered_hist_price.cov()
+```
+
+Ventana rodante estricta, covarianza solo con datos previos. **Sin look-ahead.** Es
+mejor disciplina temporal que la que muchos repos con más estrellas exhiben.
+
+Dos matices menores: el índice en `i` usa el retorno de `i`, así que operar al cierre
+de `i` sería ejecución en la misma barra (el motor de este proyecto lo impide con un
+retardo de una barra); y el `dropna(axis=1)` filtra silenciosamente los nombres con
+huecos, aplicando un filtro de supervivencia por ventana.
+
+### L6 — El hallazgo decisivo: búsqueda sobre Sharpe sin deflactar
+
+```python
+# finrl/agents/stablebaselines3/tune_sb3.py
+import optuna
+n_trials: int = 30                      # 30 configuraciones de hiperparametros
+def calculate_sharpe(self, df): ...     # el objetivo a maximizar
+# "threshold: tolerance for increase in sharpe ratio"
+```
+
+FinRL **busca 30 configuraciones maximizando Sharpe** y reporta la mejor. Y el grep
+de `deflated|bonferroni|multiple.test|family.wise|false.discovery|data.snoop`
+devuelve **0 archivos**: no hay ninguna corrección por testeo múltiple.
+
+Esto no es una crítica abstracta. Lo cuantifiqué con el arnés de este proyecto,
+sobre **ruido gaussiano puro** (`mu = 0`, sin señal alguna), 756 días (~3 años, el
+horizonte típico de sus ejemplos), eligiendo el mejor de 30 como hace `tune_sb3`:
+
+```
+Sharpe anualizado del GANADOR, puro ruido (400 repeticiones):
+  mediana 1.141    p90 1.558    max 2.721
+```
+
+**Con 30 trials y cero señal, un Sharpe de ~1.14 es el resultado esperado.** No es
+un caso extremo: es la mediana.
+
+Una corrida concreta de ruido puro que se vería publicable, pasada por los gates:
+
+```
+Sharpe anualizado del ganador de 30 trials:  1.4456
+  DSR          0.4215   (umbral 0.95)
+  PBO          0.4819
+  CI excluye 0 True        <- el CI por si solo NO protege
+  CERTIFICA    False
+```
+
+El intervalo de confianza bootstrap **excluye el cero incluso para ruido puro** —
+confirmación independiente de que un CI aislado no es un control de overfitting.
+Solo el DSR con el conteo honesto de trials lo rechaza.
+
+### Veredicto
+
+| Dimensión | Estado |
+|---|---|
+| Licencia | **MIT real**, verificada en árbol y API. Usable |
+| Ingeniería | Sólida. Capas limpias, 99 archivos, entornos Gym reutilizables |
+| Backtest | **Existe**, con walk-forward rodante real |
+| Disciplina temporal | **Parcialmente buena** (turbulencia PIT), sin garantías estructurales |
+| Costes | Lineales. Sin impacto, spread, ADV ni borrow → capacidad infinita implícita |
+| Universo | **Sesgo de supervivencia hardcodeado** en el archivo más grande del repo |
+| Control de overfitting | **Ausente.** Busca 30 trials sobre Sharpe y no deflacta |
+
+**Conclusión:** FinRL es buena infraestructura para *investigar* RL financiero y una
+referencia legítima de entornos y adaptadores. **No es evidencia de que sus
+estrategias funcionen**, y su propio tooling de tuning produce, por diseño, el
+falso positivo que este proyecto demostró numéricamente. Encaja exactamente en el
+diagnóstico de arXiv:2605.19337 (**R3 = 0, solo 2 de 80 estudios en R2**) y en el de
+arXiv:2605.16895 (*The Alpha Illusion*).
+
+### Qué tomar y qué no
+
+| Tomar | Por qué |
+|---|---|
+| Separación agents / meta / applications | Permite cambiar de librería de RL sin tocar entornos |
+| Turbulencia con ventana rodante estricta | Control de riesgo PIT correcto, portable |
+| `stock_trading_rolling_window.py` | Esqueleto de reentrenamiento walk-forward |
+| Procesadores de datos multi-fuente | Yahoo, Alpaca, WRDS, EODHD detrás de una interfaz común |
+
+| No tomar | Por qué |
+|---|---|
+| `config_tickers.py` | Sesgo de supervivencia embotellado. Usar universo PIT con deslistados |
+| `buy_cost_pct` / `sell_cost_pct` | Lineal. Sustituir por impacto de raíz cuadrada con ADV |
+| `tune_sb3.py` tal cual | Requiere registrar los 30 trials en un ledger y deflactar el Sharpe |
+| Cualquier Sharpe reportado | Sin deflactar ni PBO, no distingue señal de la mediana del ruido |
