@@ -11,6 +11,14 @@ from __future__ import annotations
 from alphalab.cli.commands.calibration import CalibrationOptions, run_calibration
 from alphalab.cli.commands.doctor import DoctorOptions, run_doctor
 from alphalab.cli.commands.journal import JournalOptions, run_journal
+from alphalab.cli.commands.paper import (
+    PaperLogOptions,
+    PaperRunOptions,
+    PaperStatusOptions,
+    run_paper_log,
+    run_paper_run,
+    run_paper_status,
+)
 from alphalab.cli.commands.predict import PredictOptions, run_predict
 from alphalab.cli.commands.research import ResearchOptions, run_research
 from alphalab.cli.commands.schedule import ScheduleOptions, run_schedule_generate
@@ -20,6 +28,9 @@ __all__ = [
     "CalibrationOptions",
     "DoctorOptions",
     "JournalOptions",
+    "PaperLogOptions",
+    "PaperRunOptions",
+    "PaperStatusOptions",
     "PredictOptions",
     "ResearchOptions",
     "ScheduleOptions",
@@ -27,6 +38,9 @@ __all__ = [
     "run_calibration",
     "run_doctor",
     "run_journal",
+    "run_paper_log",
+    "run_paper_run",
+    "run_paper_status",
     "run_predict",
     "run_research",
     "run_schedule_generate",

@@ -25,12 +25,18 @@ from alphalab.cli.commands import (
     CalibrationOptions,
     DoctorOptions,
     JournalOptions,
+    PaperLogOptions,
+    PaperRunOptions,
+    PaperStatusOptions,
     ResearchOptions,
     ScheduleOptions,
     SettleOptions,
     run_calibration,
     run_doctor,
     run_journal,
+    run_paper_log,
+    run_paper_run,
+    run_paper_status,
     run_predict,
     run_research,
     run_schedule_generate,
@@ -45,6 +51,8 @@ from alphalab.cli.forecast_paths import (
 
 _PROG = "alphalab"
 _DEFAULT_DB = default_journal_db()
+_DEFAULT_EXECUTION_DB = default_journal_db().parent / "execution.db"
+_DEFAULT_PRICES_DIR = default_prices_dir()
 
 
 def _project_root() -> Path:
@@ -81,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     _build_calibration_parser(sub)
     _build_schedule_parser(sub)
     _build_doctor_parser(sub)
+    _build_paper_parser(sub)
     _build_run_cadence_parser(sub)
     return parser
 
@@ -267,6 +276,78 @@ def _build_doctor_parser(sub: argparse._SubParsersAction) -> None:  # type: igno
     _add_common_output_flags(p)
 
 
+def _build_paper_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    p = sub.add_parser(
+        "paper",
+        help="Paper trading: status, run (dry-run by default), log. Paper account only.",
+        description=(
+            "Operate the paper-trading loop. 'run' is a dry-run unless --submit is "
+            "given, so the default never sends an order. No strategy here has a "
+            "demonstrated edge; this is a forward test of execution, not a profit bet."
+        ),
+    )
+    paper_sub = p.add_subparsers(dest="paper_command", metavar="SUBCOMMAND")
+    _build_paper_status_parser(paper_sub)
+    _build_paper_run_parser(paper_sub)
+    _build_paper_log_parser(paper_sub)
+
+
+def _add_paper_common(parser: argparse.ArgumentParser, *, with_prices: bool) -> None:
+    parser.add_argument(
+        "--execution-db",
+        type=Path,
+        default=_DEFAULT_EXECUTION_DB,
+        help=f"Append-only execution log DB (default: {_DEFAULT_EXECUTION_DB}).",
+    )
+    if with_prices:
+        parser.add_argument(
+            "--prices-dir",
+            type=Path,
+            default=_DEFAULT_PRICES_DIR,
+            help=f"Directory of <ticker>.csv series (default: {_DEFAULT_PRICES_DIR}).",
+        )
+        parser.add_argument(
+            "--halt-file",
+            type=Path,
+            default=None,
+            help="Kill-switch halt file path (default: ./HALT at the repo root).",
+        )
+    _add_common_output_flags(parser)
+
+
+def _build_paper_status_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    s = sub.add_parser(
+        "status",
+        help="Read-only: account, positions, reconciliation, kill switch, market clock.",
+    )
+    _add_paper_common(s, with_prices=True)
+
+
+def _build_paper_run_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    r = sub.add_parser(
+        "run",
+        help="Run one cycle. Dry-run by default; pass --submit to send paper orders.",
+        description="Compute the plan and (only with --submit) send it to the paper account.",
+    )
+    group = r.add_mutually_exclusive_group()
+    group.add_argument(
+        "--submit",
+        action="store_true",
+        help="Actually send orders to the paper account. Default is a dry run.",
+    )
+    group.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Explicitly request a dry run (this is already the default).",
+    )
+    _add_paper_common(r, with_prices=True)
+
+
+def _build_paper_log_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    lg = sub.add_parser("log", help="Print the append-only execution history.")
+    _add_paper_common(lg, with_prices=False)
+
+
 def _build_run_cadence_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     # Hidden entrypoint fired by the launchd plists that `schedule generate`
     # writes. Not part of the user-facing surface, so it carries no help text.
@@ -280,6 +361,52 @@ def _parse_date(raw: str) -> date:
         return date.fromisoformat(raw)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"invalid date {raw!r} (use YYYY-MM-DD)") from exc
+
+
+def _dispatch_paper(args: argparse.Namespace, *, out: TextIO, err: TextIO, no_color: bool) -> int:
+    """Route a ``paper`` invocation to its subcommand runner."""
+    command = getattr(args, "paper_command", None)
+    if command == "status":
+        return run_paper_status(
+            PaperStatusOptions(
+                execution_db=args.execution_db,
+                prices_dir=args.prices_dir,
+                halt_path=args.halt_file,
+                as_json=args.json,
+                no_color=no_color,
+            ),
+            out=out,
+            err=err,
+        )
+    if command == "run":
+        return run_paper_run(
+            PaperRunOptions(
+                execution_db=args.execution_db,
+                prices_dir=args.prices_dir,
+                halt_path=args.halt_file,
+                submit=bool(getattr(args, "submit", False)),
+                as_json=args.json,
+                no_color=no_color,
+            ),
+            out=out,
+            err=err,
+        )
+    if command == "log":
+        return run_paper_log(
+            PaperLogOptions(
+                execution_db=args.execution_db,
+                as_json=args.json,
+                no_color=no_color,
+            ),
+            out=out,
+            err=err,
+        )
+    print(
+        "usage: alphalab paper {status|run|log} [options]\n"
+        "  run is a dry-run by default; pass --submit to send paper orders.",
+        file=err,
+    )
+    return 2
 
 
 def main(
@@ -368,6 +495,8 @@ def main(
             out=out,
             err=err,
         )
+    if args.command == "paper":
+        return _dispatch_paper(args, out=out, err=err, no_color=no_color)
     if args.command == "_run-cadence":
         from alphalab.cli.commands.run_cadence import run_cadence
 

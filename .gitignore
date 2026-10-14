@@ -36,3 +36,4 @@ htmlcov/
 # macOS
 .DS_Store
 data/
+HALT
