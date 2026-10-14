@@ -19,6 +19,7 @@ from alphalab.domain.backtest.metrics import (
 from alphalab.domain.backtest.relative import RelativePerformance, relative_performance
 from alphalab.domain.backtest.signals import (
     equal_weight_signal,
+    liquidity_screened,
     momentum_signal,
     rank_ensemble_signal,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "TurnoverCostModel",
     "buy_and_hold",
     "equal_weight_signal",
+    "liquidity_screened",
     "max_drawdown",
     "metrics_from_returns",
     "momentum_signal",

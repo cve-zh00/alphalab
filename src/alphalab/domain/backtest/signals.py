@@ -13,7 +13,12 @@ from collections.abc import Mapping, Sequence
 from alphalab.domain.backtest.context import SignalContext, SignalFunction
 from alphalab.domain.types import Ticker
 
-__all__ = ["equal_weight_signal", "momentum_signal", "rank_ensemble_signal"]
+__all__ = [
+    "equal_weight_signal",
+    "liquidity_screened",
+    "momentum_signal",
+    "rank_ensemble_signal",
+]
 
 
 def momentum_signal(*, lookback: int, skip: int = 0) -> SignalFunction:
@@ -107,3 +112,72 @@ def _normalised_ranks(scores: Mapping[Ticker, float]) -> dict[Ticker, float]:
     if last == 0:
         return {ordered[0][0]: 1.0}
     return {ticker: i / last for i, (ticker, _) in enumerate(ordered)}
+
+
+def liquidity_screened(
+    inner: SignalFunction,
+    *,
+    min_price: float = 5.0,
+    min_dollar_volume: float = 5_000_000.0,
+    window: int = 60,
+) -> SignalFunction:
+    """Restrict ``inner``'s opinions to names that are actually tradable.
+
+    Why a screen is mandatory, not cosmetic
+    ---------------------------------------
+    Run without one on a mechanically sampled universe, this project measured
+    an equal-weight portfolio compounding at an impossible **+414% a year**.
+    That figure is an artefact, not an edge: on a sub-dollar stock a one-cent
+    tick is a double-digit percentage return, and equal-weighting hundreds of
+    such names harvests bid-ask bounce rather than value. Any cost assumption
+    calibrated for liquid large caps is pure fiction on those names.
+
+    Screening on price and traded value removes the artefact and makes the cost
+    model honest, because the surviving names are ones where a few basis points
+    of friction is a defensible estimate.
+
+    The screen is point-in-time by construction: it reads only the trailing
+    ``window`` bars of the context, which is itself truncated at the decision
+    date. Names whose bars carry no volume are excluded rather than assumed
+    liquid — absent data is not evidence of tradability.
+    """
+    if min_price < 0.0 or min_dollar_volume < 0.0:
+        raise ValueError("thresholds must be non-negative")
+    if window <= 0:
+        raise ValueError("window must be positive")
+
+    def score(context: SignalContext) -> Mapping[Ticker, float]:
+        return {
+            ticker: value
+            for ticker, value in inner(context).items()
+            if _is_liquid(context, ticker, min_price, min_dollar_volume, window)
+        }
+
+    return score
+
+
+def _is_liquid(
+    context: SignalContext,
+    ticker: Ticker,
+    min_price: float,
+    min_dollar_volume: float,
+    window: int,
+) -> bool:
+    """Whether a name cleared both thresholds over the trailing window."""
+    bars = context.history(ticker)[-window:]
+    if not bars:
+        return False
+    if bars[-1].close < min_price:
+        return False
+    traded = [bar.close * bar.volume for bar in bars if bar.volume is not None]
+    if len(traded) < len(bars):
+        return False
+    return _median(traded) >= min_dollar_volume
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
