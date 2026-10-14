@@ -173,6 +173,13 @@ class EdgarClient:
         filing date would misstate the period, and relaxing the invariant would
         weaken the anti-leakage guarantee for every other record. They are rare
         (4 of ~30k facts for KO) and confined to non-core concepts.
+
+        A *duration* fact (revenue, cash flow — anything accumulated over a
+        span) carries ``start`` alongside ``end``; an *instant* fact (assets,
+        shares outstanding) carries only ``end``. That distinction is recorded
+        in ``period_start`` rather than dropped, because without it a quarterly
+        and an annual figure are indistinguishable downstream and the most
+        recently filed one wins — which for any flow is the quarter.
         """
         end = entry.get("end")
         filed = entry.get("filed")
@@ -185,6 +192,10 @@ class EdgarClient:
         observed_at = _parse_date(filed)
         if observed_at < as_of:
             return None
+        start = entry.get("start")
+        period_start = _parse_date(start) if isinstance(start, str) else None
+        if period_start is not None and period_start > as_of:
+            return None
         return PITRecord(
             ticker=ticker,
             field=concept_name,
@@ -192,6 +203,7 @@ class EdgarClient:
             as_of=as_of,
             observed_at=observed_at,
             source=_SOURCE,
+            period_start=period_start,
         )
 
 

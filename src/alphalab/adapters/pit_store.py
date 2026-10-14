@@ -27,10 +27,10 @@ from alphalab.domain.types import Ticker
 
 # Allow-listed physical column names. Query building never accepts a column
 # name from the caller; this frozenset is the single source of truth.
-_COLUMNS = ("ticker", "field", "value", "as_of", "observed_at", "source")
+_COLUMNS = ("ticker", "field", "value", "as_of", "observed_at", "source", "period_start")
 
 _SELECT_SQL = (
-    "SELECT ticker, field, value, as_of, observed_at, source "
+    "SELECT ticker, field, value, as_of, observed_at, source, period_start "
     "FROM read_parquet(?) "
     "WHERE ticker = ? AND field = ? AND observed_at <= ? "
     "ORDER BY observed_at, value"
@@ -98,6 +98,7 @@ class ParquetPITStore:
             "as_of": record.as_of,
             "observed_at": record.observed_at,
             "source": record.source,
+            "period_start": record.period_start,
         }
 
     @staticmethod
@@ -110,6 +111,7 @@ class ParquetPITStore:
                 ("as_of", pa.date32()),
                 ("observed_at", pa.date32()),
                 ("source", pa.string()),
+                ("period_start", pa.date32()),
             ]
         )
         columns = {name: [row[name] for row in rows] for name in _COLUMNS}
@@ -117,7 +119,7 @@ class ParquetPITStore:
 
     @staticmethod
     def _to_record(row: tuple[object, ...]) -> PITRecord:
-        ticker, field, value, as_of, observed_at, source = row
+        ticker, field, value, as_of, observed_at, source, period_start = row
         return PITRecord(
             ticker=Ticker(str(ticker)),
             field=str(field),
@@ -125,6 +127,7 @@ class ParquetPITStore:
             as_of=_as_date(as_of),
             observed_at=_as_date(observed_at),
             source=None if source is None else str(source),
+            period_start=None if period_start is None else _as_date(period_start),
         )
 
 

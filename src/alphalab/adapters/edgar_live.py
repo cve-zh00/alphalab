@@ -16,11 +16,23 @@ Two properties are preserved deliberately:
   records under the canonical name. If no candidate is present the field is
   reported in :attr:`FundamentalRecords.missing_fields` — never fabricated,
   never zero-filled.
+* **Annual flows only.** A *flow* field is kept only when the fact spans a full
+  year. The compute operators consume annual figures, but EDGAR publishes a
+  filer's quarterly facts too, and those are filed more recently than the last
+  10-K — so "most recently filed" silently resolves to a three-month number.
+  Measured on ABT: diluted EPS came through as 0.61 (one quarter) where the
+  annual figure is near 3.30, and dividends per share as 0.59 against an annual
+  2.36. Every valuation method then landed roughly an order of magnitude below
+  the traded price, the output contract gate withheld the implausible figure,
+  and the forecast fell back to even odds. A flow with no annual fact is
+  reported *missing* rather than quietly backfilled from a quarter: a stated
+  absence costs one name, a 4x understatement poisons the whole comparison.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -105,6 +117,36 @@ CANONICAL_CONCEPTS: dict[FundamentalField, tuple[str, ...]] = {
 }
 
 
+#: Canonical fields accumulated over a span rather than measured at an instant.
+#: These are the ones that must be taken from an annual period; everything else
+#: is a balance-sheet stock, which has no duration and is read as filed.
+FLOW_FIELDS: frozenset[FundamentalField] = frozenset(
+    {
+        FundamentalField.REVENUE,
+        FundamentalField.NET_INCOME,
+        FundamentalField.EPS_DILUTED,
+        FundamentalField.OPERATING_INCOME,
+        FundamentalField.DEPRECIATION_AMORTIZATION,
+        FundamentalField.OPERATING_CASH_FLOW,
+        FundamentalField.CAPEX,
+        FundamentalField.DIVIDEND_PER_SHARE,
+    }
+)
+
+#: Inclusive day-count bounds for "a full year". A 52/53-week filer reports 364
+#: or 371 days and a calendar-year filer 365 or 366, so the window is widened to
+#: tolerate transition periods while staying far clear of a half-year (~182) and
+#: a quarter (~91) — the two it exists to exclude.
+_ANNUAL_MIN_DAYS = 300
+_ANNUAL_MAX_DAYS = 400
+
+
+def _is_annual(record: PITRecord) -> bool:
+    """Whether ``record`` covers a full year (instants are never annual flows)."""
+    days = record.period_days
+    return days is not None and _ANNUAL_MIN_DAYS <= days <= _ANNUAL_MAX_DAYS
+
+
 @dataclass(frozen=True)
 class FundamentalRecords:
     """Canonicalised, as-filed fundamentals plus an honest absence report.
@@ -135,12 +177,13 @@ def extract_fundamentals(client: EdgarClient, ticker: Ticker, *, cik: str) -> Fu
     resolved: dict[FundamentalField, str] = {}
 
     for field, concepts in CANONICAL_CONCEPTS.items():
-        chosen = _first_present(concepts, by_concept)
+        keep = _is_annual if field in FLOW_FIELDS else _any_record
+        chosen = _first_present(concepts, by_concept, keep=keep)
         if chosen is None:
             missing.append(field)
             continue
         resolved[field] = chosen
-        records.extend(_relabel(rec, field) for rec in by_concept[chosen])
+        records.extend(_relabel(rec, field) for rec in by_concept[chosen] if keep(rec))
 
     return FundamentalRecords(
         records=tuple(records),
@@ -149,9 +192,27 @@ def extract_fundamentals(client: EdgarClient, ticker: Ticker, *, cik: str) -> Fu
     )
 
 
-def _first_present(concepts: tuple[str, ...], by_concept: dict[str, list[PITRecord]]) -> str | None:
+def _any_record(record: PITRecord) -> bool:
+    """Accept every record — the rule for stocks, which have no duration."""
+    return True
+
+
+def _first_present(
+    concepts: tuple[str, ...],
+    by_concept: dict[str, list[PITRecord]],
+    *,
+    keep: Callable[[PITRecord], bool],
+) -> str | None:
+    """First candidate concept with at least one *usable* fact, or ``None``.
+
+    Usability is part of the test rather than a filter applied afterwards. A
+    filer may tag its preferred concept only quarterly while a fallback concept
+    carries the annual figure; picking the first concept with *any* fact and
+    only then demanding an annual one would discard that fallback and report
+    the field missing when it is in fact available.
+    """
     for concept in concepts:
-        if by_concept.get(concept):
+        if any(keep(record) for record in by_concept.get(concept, ())):
             return concept
     return None
 

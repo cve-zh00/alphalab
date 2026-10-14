@@ -74,12 +74,31 @@ def _shares(concept: str, entries: list[dict[str, object]]) -> dict[str, object]
 
 
 def _annual(
-    concept_block: dict[str, object], concept: str, values: dict[str, float], unit: str = "USD"
+    concept_block: dict[str, object],
+    concept: str,
+    values: dict[str, float],
+    unit: str = "USD",
+    *,
+    duration: bool = True,
 ) -> dict[str, object]:
-    entries = [
-        {"end": f"{year}-12-31", "val": val, "filed": f"{year + 1}-02-15"}
-        for year, val in values.items()
-    ]
+    """Add annual facts for ``concept``, as EDGAR actually tags them.
+
+    A *duration* fact (a flow accumulated over the year) carries ``start``; an
+    *instant* fact (a balance-sheet stock) carries only ``end``. The extraction
+    layer relies on exactly that distinction to tell a full year apart from a
+    single quarter, so a fixture that omitted ``start`` would be testing a
+    payload shape EDGAR never sends.
+    """
+    entries: list[dict[str, object]] = []
+    for year, val in values.items():
+        entry: dict[str, object] = {
+            "end": f"{year}-12-31",
+            "val": val,
+            "filed": f"{year + 1}-02-15",
+        }
+        if duration:
+            entry["start"] = f"{year}-01-01"
+        entries.append(entry)
     builder = {"USD": _usd, "USD/shares": _usd_per_share, "shares": _shares}[unit]
     concept_block.update(builder(concept, entries))
     return concept_block
@@ -93,17 +112,17 @@ def _full_facts(*, with_dividends: bool) -> dict[str, object]:
     _annual(
         block, "PaymentsToAcquirePropertyPlantAndEquipment", {2020: 20.0, 2021: 22.0, 2022: 24.0}
     )
-    _annual(block, "CommonStockSharesOutstanding", {2022: 10.0}, unit="shares")
-    _annual(block, "StockholdersEquity", {2022: 500.0})
-    _annual(block, "LongTermDebtNoncurrent", {2022: 100.0})
-    _annual(block, "CashAndCashEquivalentsAtCarryingValue", {2022: 50.0})
+    _annual(block, "CommonStockSharesOutstanding", {2022: 10.0}, unit="shares", duration=False)
+    _annual(block, "StockholdersEquity", {2022: 500.0}, duration=False)
+    _annual(block, "LongTermDebtNoncurrent", {2022: 100.0}, duration=False)
+    _annual(block, "CashAndCashEquivalentsAtCarryingValue", {2022: 50.0}, duration=False)
     _annual(block, "EarningsPerShareDiluted", {2022: 5.0}, unit="USD/shares")
     _annual(block, "OperatingIncomeLoss", {2022: 90.0})
     _annual(block, "DepreciationDepletionAndAmortization", {2022: 15.0})
     _annual(block, "Revenues", {2022: 300.0})
     _annual(block, "NetIncomeLoss", {2022: 60.0})
-    _annual(block, "Assets", {2022: 800.0})
-    _annual(block, "Liabilities", {2022: 300.0})
+    _annual(block, "Assets", {2022: 800.0}, duration=False)
+    _annual(block, "Liabilities", {2022: 300.0}, duration=False)
     if with_dividends:
         _annual(block, "CommonStockDividendsPerShareDeclared", {2022: 2.0}, unit="USD/shares")
     return {"facts": {"us-gaap": block}}
@@ -227,13 +246,23 @@ class TestAsFiledRestatement:
             "PaymentsToAcquirePropertyPlantAndEquipment",
             {2020: 20.0, 2021: 22.0, 2022: 24.0},
         )
-        _annual(block, "CommonStockSharesOutstanding", {2022: 10.0}, unit="shares")
+        _annual(block, "CommonStockSharesOutstanding", {2022: 10.0}, unit="shares", duration=False)
         block.update(
             _usd(
                 "NetIncomeLoss",
                 [
-                    {"end": "2022-12-31", "val": 60.0, "filed": "2023-02-15"},
-                    {"end": "2022-12-31", "val": 40.0, "filed": "2023-09-01"},
+                    {
+                        "start": "2022-01-01",
+                        "end": "2022-12-31",
+                        "val": 60.0,
+                        "filed": "2023-02-15",
+                    },
+                    {
+                        "start": "2022-01-01",
+                        "end": "2022-12-31",
+                        "val": 40.0,
+                        "filed": "2023-09-01",
+                    },
                 ],
             )
         )
@@ -274,6 +303,69 @@ class TestAsFiledRestatement:
             store, Ticker("ACME"), FundamentalField.NET_INCOME, date(2023, 12, 31)
         )
         assert late == 40.0
+
+
+class TestMultiYearFiling:
+    """One filing restates several years at once, and they tie on ``filed``.
+
+    A 10-K carries the current year's figure alongside the two before it, all
+    stamped with the same filing date. Ranking only by filing date leaves them
+    tied and the winner falls out of whatever order the store returned — on
+    real data that handed AMD its FY2023 diluted EPS of 0.53 instead of
+    FY2025's 2.65: two years stale and less than half the right size.
+    """
+
+    def test_picks_the_latest_period_not_an_arbitrary_tie(self, tmp_path) -> None:
+        # Arrange — three fiscal years, every one filed on the same day.
+        block: dict[str, object] = {}
+        block.update(
+            _usd(
+                "NetIncomeLoss",
+                [
+                    {
+                        "start": f"{year}-01-01",
+                        "end": f"{year}-12-31",
+                        "val": val,
+                        "filed": "2026-02-04",
+                    }
+                    for year, val in ((2023, 53.0), (2024, 100.0), (2025, 265.0))
+                ],
+            )
+        )
+        facts = {"facts": {"us-gaap": block}}
+        transport = _MapTransport(_CIK_MAP, facts)
+        clock = _FakeClock()
+        cik_resolver = CikResolver(
+            CikSettings(user_agent="t t@e.com"),
+            transport=transport,
+            cache_path=tmp_path / "cik.json",
+            clock=clock,
+        )
+        edgar_client = EdgarClient(
+            EdgarSettings(user_agent="t t@e.com"), transport=transport, clock=clock
+        )
+        from alphalab.adapters.pit_store import ParquetPITStore
+        from alphalab.app.ingest import latest_knowable_value
+
+        # Act
+        build_request(
+            Ticker("ACME"),
+            knowledge_date=date(2026, 6, 30),
+            assumptions=_assumptions(),
+            cik_resolver=cik_resolver,
+            edgar_client=edgar_client,
+            price_source=_StubPriceSource([PricePoint(on=date(2026, 6, 29), close=50.0)]),
+            pit_store_root=tmp_path / "store",
+            run_metadata=_run_metadata(),
+        )
+
+        # Assert — the most recent fiscal year wins the tie, not the smallest
+        # value or whichever row the store happened to yield first.
+        store = ParquetPITStore(root=tmp_path / "store")
+        resolved = latest_knowable_value(
+            store, Ticker("ACME"), FundamentalField.NET_INCOME, date(2026, 6, 30)
+        )
+        assert resolved == 265.0
 
 
 class TestInsufficientData:

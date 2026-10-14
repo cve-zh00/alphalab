@@ -39,6 +39,17 @@ class PITRecord(BaseModel):
         as_of: Date the datum refers to (e.g. fiscal quarter end).
         observed_at: Date the datum became publicly knowable (e.g. filing).
         source: Optional provenance tag (e.g. ``"SEC-EDGAR"``).
+        period_start: For a *flow* measured over a span (revenue, cash flow,
+            earnings per share), the first day of that span; ``as_of`` is its
+            last. ``None`` for a *stock* measured at an instant (assets, equity,
+            shares outstanding), which has no duration.
+
+            Without this, a quarter of revenue and a year of revenue are
+            indistinguishable — both are just a value with an end date — and
+            whichever was filed most recently wins. That silently feeds a
+            three-month figure to a model expecting twelve, understating every
+            flow by roughly four. Keeping the span makes the two separable at
+            the point where the choice is actually made.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -49,6 +60,7 @@ class PITRecord(BaseModel):
     as_of: date
     observed_at: date
     source: str | None = None
+    period_start: date | None = None
 
     @model_validator(mode="after")
     def _observed_not_before_as_of(self) -> PITRecord:
@@ -58,4 +70,17 @@ class PITRecord(BaseModel):
                 f"(got observed_at={self.observed_at!r} < as_of={self.as_of!r}): "
                 "a datum cannot be knowable before the period it describes"
             )
+        if self.period_start is not None and self.period_start > self.as_of:
+            raise ValueError(
+                "period_start must be on or before as_of "
+                f"(got period_start={self.period_start!r} > as_of={self.as_of!r}): "
+                "a period cannot start after it ends"
+            )
         return self
+
+    @property
+    def period_days(self) -> int | None:
+        """Length of the span this datum covers, or ``None`` for an instant."""
+        if self.period_start is None:
+            return None
+        return (self.as_of - self.period_start).days
