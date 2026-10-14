@@ -216,7 +216,7 @@ existe de verdad**. Lo que no existe es la capa de control de overfitting.
 
 ```python
 # finrl/meta/env_stock_trading/env_stocktrading.py
-buy_cost_pct: list[float]      # default tipico 1e-3 = 10 bps
+buy_cost_pct: list[float]  # default tipico 1e-3 = 10 bps
 sell_cost_pct: list[float]
 ...
 self.cost += price * shares * self.sell_cost_pct[index]
@@ -264,8 +264,8 @@ Su único control de riesgo está bien implementado en el eje temporal:
 ```python
 # finrl/meta/preprocessor/preprocessors.py
 hist_price = df_price_pivot[
-    (df_price_pivot.index < unique_date[i])          # estrictamente anterior
-    & (df_price_pivot.index >= unique_date[i - 252]) # ventana rodante de 1 año
+    (df_price_pivot.index < unique_date[i])  # estrictamente anterior
+    & (df_price_pivot.index >= unique_date[i - 252])  # ventana rodante de 1 año
 ]
 cov_temp = filtered_hist_price.cov()
 ```
@@ -283,8 +283,13 @@ huecos, aplicando un filtro de supervivencia por ventana.
 ```python
 # finrl/agents/stablebaselines3/tune_sb3.py
 import optuna
-n_trials: int = 30                      # 30 configuraciones de hiperparametros
-def calculate_sharpe(self, df): ...     # el objetivo a maximizar
+
+n_trials: int = 30  # 30 configuraciones de hiperparametros
+
+
+def calculate_sharpe(self, df): ...  # el objetivo a maximizar
+
+
 # "threshold: tolerance for increase in sharpe ratio"
 ```
 
