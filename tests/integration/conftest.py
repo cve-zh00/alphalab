@@ -21,3 +21,8 @@ def pytest_configure(config: pytest.Config) -> None:
         "llm: real end-to-end test that hits a running Ollama server "
         "(opt-in via ALPHALAB_LLM_TESTS=1).",
     )
+    config.addinivalue_line(
+        "markers",
+        "edgar_live: real end-to-end test that hits the live SEC EDGAR API "
+        "(opt-in via ALPHALAB_LIVE_TESTS=1).",
+    )
