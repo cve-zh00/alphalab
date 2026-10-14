@@ -7,7 +7,7 @@ gated artifact to the engine, which either records a scoreable
 :class:`~alphalab.domain.journal.Prediction` in the journal or a stated
 :class:`~alphalab.domain.forecast.Abstention` in the abstention store.
 
-Two honest invariants surface here:
+Three honest invariants surface here:
 
 * An **abstention is not a failure.** A HOLD, or a verdict that contradicts its
   own valuation, is a deliberate refusal to make a scoreable claim — exit 0,
@@ -16,6 +16,11 @@ Two honest invariants surface here:
   behaviour, not a bug: a claim the model could already have seen is hindsight,
   not a forecast, and recording it would irreversibly contaminate calibration.
   It is reported as an actionable usage error (exit 2), never a stack trace.
+* A **ticker without usable data is skipped, not fatal.** Across a real universe
+  many names have no standard EDGAR companyfacts, and one of them must not
+  silence the rest of the batch. Skips are reported individually and counted at
+  the end; only an error about the invocation itself (leakage) aborts the run,
+  and a run where *nothing* was usable still exits non-zero.
 
 No valuation logic lives here; every number comes from the pipeline, every
 dated row from the engine. This module only orchestrates and renders.
@@ -89,8 +94,28 @@ class _Result:
 
 
 @dataclass(frozen=True)
-class _Failure:
-    """A reported, non-recoverable per-ticker failure carrying its exit code."""
+class _Skipped:
+    """A ticker whose data was unusable: already reported, batch continues.
+
+    One name without usable fundamentals says nothing about the next one, so it
+    must not silence the rest of the batch. The reason is kept so the run ends
+    with a visible census of what was skipped and why — an omission the user can
+    see is honest; one that vanishes is not.
+    """
+
+    ticker: str
+    reason: str
+    exit_code: int
+
+
+@dataclass(frozen=True)
+class _Abort:
+    """A reported failure that invalidates the whole run, carrying its exit code.
+
+    Reserved for errors about the *invocation* rather than about one ticker —
+    an anti-leakage refusal, say, which would reject every name identically.
+    Continuing would just reprint the same misconfiguration once per ticker.
+    """
 
     exit_code: int
 
@@ -134,21 +159,30 @@ def run_predict(opts: PredictOptions, *, out: TextIO, err: TextIO) -> int:
     journal = SqliteJournal(opts.db_path)
     abstentions = SqliteAbstentionStore(opts.abstentions_path)
     results: list[_Result] = []
+    skipped: list[_Skipped] = []
     try:
         for ticker in opts.tickers:
             outcome = _predict_one(ticker, opts, journal=journal, abstentions=abstentions, err=err)
-            if isinstance(outcome, _Failure):
+            if isinstance(outcome, _Abort):
                 return outcome.exit_code
+            if isinstance(outcome, _Skipped):
+                skipped.append(outcome)
+                continue
             results.append(outcome)
     finally:
         journal.close()
         abstentions.close()
 
     if opts.as_json:
-        print(_as_json(results, opts), file=out)
-        return 0
-    theme = theme_for(out, force_disable=opts.no_color)
-    print(_format(results, opts, theme), file=out)
+        print(_as_json(results, skipped, opts), file=out)
+    else:
+        theme = theme_for(out, force_disable=opts.no_color)
+        print(_format(results, skipped, opts, theme), file=out)
+    # A run that produced nothing at all is a failure, and reports the exit code
+    # of the first thing that went wrong — so a single-ticker invocation keeps
+    # exactly the exit code it had before batches became fault-tolerant.
+    if not results and skipped:
+        return skipped[0].exit_code
     return 0
 
 
@@ -159,8 +193,8 @@ def _predict_one(
     journal: SqliteJournal,
     abstentions: SqliteAbstentionStore,
     err: TextIO,
-) -> _Result | _Failure:
-    """Produce and persist one forecast, or a :class:`_Failure` already reported."""
+) -> _Result | _Skipped | _Abort:
+    """Produce and persist one forecast, or an already-reported skip/abort."""
     research_opts = ResearchOptions(
         ticker=ticker,
         knowledge_date=opts.knowledge_date,
@@ -175,13 +209,13 @@ def _predict_one(
         artifact = _artifact_for(research_opts, opts.assume_verdict)
     except FixtureNotFoundError as exc:
         print(f"error: {exc}", file=err)
-        return _Failure(exit_code=2)
+        return _Skipped(ticker=ticker, reason=str(exc), exit_code=2)
     except LiveIngestUnavailableError as exc:
         print(f"error: {exc}", file=err)
-        return _Failure(exit_code=1)
+        return _Skipped(ticker=ticker, reason=str(exc), exit_code=1)
     except Exception as exc:  # boundary: never leak a stack trace
         report_pipeline_error(exc, use_llm=opts.use_llm, err=err)
-        return _Failure(exit_code=1)
+        return _Skipped(ticker=ticker, reason=str(exc), exit_code=1)
 
     horizon = opts.knowledge_date + timedelta(days=opts.horizon_days)
     try:
@@ -201,7 +235,7 @@ def _predict_one(
             "model could already have seen is hindsight, not a forecast.",
             file=err,
         )
-        return _Failure(exit_code=2)
+        return _Abort(exit_code=2)
     if isinstance(recorded, Abstention):
         return _Result(ticker=ticker, prediction=None, abstention=recorded)
     return _Result(ticker=ticker, prediction=recorded, abstention=None)
@@ -220,10 +254,18 @@ def _artifact_for(research_opts: ResearchOptions, assume: Verdict | None) -> Equ
     return artifact
 
 
-def _format(results: list[_Result], opts: PredictOptions, theme: Theme) -> str:
+def _format(
+    results: list[_Result], skipped: list[_Skipped], opts: PredictOptions, theme: Theme
+) -> str:
     lines = [theme.bold("FORECAST  (forward-dated, append-only)")]
     for result in results:
         lines.extend(_format_one(result, theme))
+    for skip in skipped:
+        badge = theme.paint("SKIPPED", "bold", "red")
+        lines.append(f"  [{badge}] {skip.ticker}: {skip.reason}")
+    if skipped:
+        total = len(results) + len(skipped)
+        lines.append(theme.dim(f"  {len(results)}/{total} usable; {len(skipped)} skipped."))
     lines.append(theme.dim(f"  journal: {opts.db_path}"))
     lines.append(theme.dim(f"  abstentions: {opts.abstentions_path}"))
     return "\n".join(lines)
@@ -244,8 +286,11 @@ def _format_one(result: _Result, theme: Theme) -> list[str]:
     return [f"  [{badge}] {abst.ticker}: reason: {abst.reason}"]
 
 
-def _as_json(results: list[_Result], opts: PredictOptions) -> str:
+def _as_json(results: list[_Result], skipped: list[_Skipped], opts: PredictOptions) -> str:
     rows = [_row(result) for result in results]
+    rows.extend(
+        {"status": "skipped", "ticker": skip.ticker, "reason": skip.reason} for skip in skipped
+    )
     payload: dict[str, object] = {
         "journal": str(opts.db_path),
         "abstentions": str(opts.abstentions_path),

@@ -225,3 +225,102 @@ class TestPredictMultipleTickers:
         )
         assert code == 2
         assert "no price fixture" in err
+
+
+class TestPredictToleratesUnusableTickers:
+    """One unusable name must not silence the rest of the batch.
+
+    Across a real universe many tickers have no usable fundamentals (ADRs,
+    funds, non-standard filers). Aborting on the first one made a mass run
+    impossible: it reported a single failure and never looked at the other 344.
+    """
+
+    def test_bad_ticker_first_does_not_abort_the_batch(self, tmp_path: Path) -> None:
+        code, out, err = _run(
+            [
+                "predict",
+                "NOTATICKER",
+                "AAPL",
+                "--no-llm",
+                "--knowledge-date",
+                "2099-01-01",
+                *_db_flags(tmp_path),
+            ]
+        )
+        assert code == 0, err
+        assert "no price fixture" in err
+        assert out.count("REGISTERED") + out.count("ABSTAINED") == 1
+        assert "SKIPPED" in out
+
+    def test_census_counts_usable_and_skipped(self, tmp_path: Path) -> None:
+        _, out, _ = _run(
+            [
+                "predict",
+                "NOTATICKER",
+                "AAPL",
+                "MSFT",
+                "--no-llm",
+                "--knowledge-date",
+                "2099-01-01",
+                *_db_flags(tmp_path),
+            ]
+        )
+        assert "2/3 usable; 1 skipped." in out
+
+    def test_skips_are_visible_in_json(self, tmp_path: Path) -> None:
+        code, out, _ = _run(
+            [
+                "predict",
+                "NOTATICKER",
+                "AAPL",
+                "--no-llm",
+                "--knowledge-date",
+                "2099-01-01",
+                "--json",
+                *_db_flags(tmp_path),
+            ]
+        )
+        assert code == 0
+        rows = json.loads(out)["results"]
+        by_status = {row["status"]: row for row in rows}
+        assert by_status["skipped"]["ticker"] == "NOTATICKER"
+        assert by_status["skipped"]["reason"]
+
+    def test_a_run_with_nothing_usable_still_fails(self, tmp_path: Path) -> None:
+        """Tolerating skips must not turn a wholly empty run into a success."""
+        code, _out, err = _run(
+            [
+                "predict",
+                "NOTATICKER",
+                "ALSONOTATICKER",
+                "--no-llm",
+                "--knowledge-date",
+                "2099-01-01",
+                *_db_flags(tmp_path),
+            ]
+        )
+        assert code == 2
+        assert err.count("no price fixture") == 2
+
+    def test_leakage_still_aborts_the_whole_batch(self, tmp_path: Path) -> None:
+        """Leakage is about the invocation, not one ticker: every name would fail."""
+        code, _out, err = _run(
+            [
+                "predict",
+                "AAPL",
+                "MSFT",
+                "--no-llm",
+                "--assume-verdict",
+                "buy",
+                "--knowledge-date",
+                "2000-01-01",
+                "--llm-cutoff",
+                "2024-01-01",
+                *_db_flags(tmp_path),
+            ]
+        )
+        assert code == 2
+        # Reported once, for the first ticker — the batch stopped there rather
+        # than reprinting the same misconfiguration for MSFT.
+        assert err.count("refused to register") == 1
+        assert "MSFT" not in err
