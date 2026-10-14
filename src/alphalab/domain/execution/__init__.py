@@ -11,6 +11,7 @@ one that must be tightened after an incident is not.
 
 from __future__ import annotations
 
+from alphalab.domain.execution.cadence import is_rebalance_due, quarter_of
 from alphalab.domain.execution.planner import plan_trades
 from alphalab.domain.execution.types import (
     Holding,
@@ -26,5 +27,7 @@ __all__ = [
     "RejectedOrder",
     "RiskLimits",
     "TradePlan",
+    "is_rebalance_due",
     "plan_trades",
+    "quarter_of",
 ]

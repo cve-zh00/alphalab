@@ -70,6 +70,10 @@ class PaperRunOptions:
     as_json: bool
     no_color: bool
 
+    #: Override the quarterly cadence gate. Trading off-schedule runs a
+    #: strategy the backtest does not describe, so it must be asked for.
+    force: bool = False
+
 
 @dataclass(frozen=True)
 class PaperLogOptions:
@@ -242,8 +246,19 @@ def run_paper_run(opts: PaperRunOptions, *, out: TextIO, err: TextIO) -> int:
     except LiveTradingNotAcknowledgedError as exc:
         print(f"error: {exc}", file=err)
         return 2
+    submit = opts.submit
+    if submit and not opts.force:
+        due, last = _rebalance_due(log)
+        if not due:
+            submit = False
+            print(
+                f"note: last rebalance {last} is in the current quarter, so the "
+                "measured quarterly schedule does not call for one today. "
+                "Reconciling without submitting; pass --force to override.",
+                file=out,
+            )
     try:
-        result = runner.run_cycle(submit=opts.submit)
+        result = runner.run_cycle(submit=submit)
     except Exception as exc:
         print(f"error: cycle failed: {_safe(exc)}", file=err)
         return 1
@@ -255,6 +270,31 @@ def run_paper_run(opts: PaperRunOptions, *, out: TextIO, err: TextIO) -> int:
         return 0
     print(render_run(result, theme), file=out)
     return 0
+
+
+def _rebalance_due(log: SqliteExecutionLog) -> tuple[bool, date | None]:
+    """Whether the quarterly schedule calls for a rebalance, and when the last was.
+
+    The measured strategy rebalances quarterly. The scheduler fires daily so
+    that reconciliation stays current and a missed day is harmless, but trading
+    every day would be a different, unmeasured strategy with roughly sixty
+    times the turnover.
+
+    Only ``SUBMITTED`` events count as a rebalance: intents and dry-runs did
+    not change the portfolio, so treating them as one would skip the real
+    trade.
+    """
+    from alphalab.adapters.execution_log import ExecutionEventKind
+    from alphalab.domain.execution import is_rebalance_due
+
+    last: date | None = None
+    for event in log:
+        if event.kind is not ExecutionEventKind.SUBMITTED:
+            continue
+        seen = event.recorded_at.date()
+        if last is None or seen > last:
+            last = seen
+    return is_rebalance_due(last_rebalance=last, today=datetime.now(UTC).date()), last
 
 
 def run_paper_log(opts: PaperLogOptions, *, out: TextIO, err: TextIO) -> int:

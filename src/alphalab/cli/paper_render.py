@@ -106,11 +106,26 @@ def _account_flag_lines(result: CycleResult, theme: Theme) -> list[str]:
 
 
 def _shadow_line(shadow: ShadowBenchmark | None, theme: Theme) -> str:
+    """Render the benchmark as a return, deliberately without a dollar figure.
+
+    The percentage is sound: it is the benchmark instrument's move from its
+    entry price to the latest close. The dollar value is not, because the
+    benchmark's notional capital is re-read from the account's *current*
+    equity on every cycle rather than fixed at inception. Showing it produced
+    lines like "$99,577.76 (+0.00%)", a hybrid that tracks the portfolio it is
+    supposed to be independent of.
+
+    Reporting only the figure that is correct beats reporting a precise-looking
+    one that is not. Restoring the dollar amount requires persisting the
+    equity observed at inception.
+    """
+    del theme  # no colour decisions here yet
     if shadow is None:
         return "  shadow SPY benchmark: unavailable (no SPY price series)"
     return (
-        f"  shadow SPY buy&hold: ${shadow.current_value:,.2f} "
-        f"({shadow.total_return:+.2%} since inception, no orders sent)"
+        f"  shadow SPY buy&hold: {shadow.total_return:+.2%} since inception "
+        f"(entry ${shadow.entry_price:,.2f}, now ${shadow.latest_price:,.2f}, "
+        "no orders sent)"
     )
 
 

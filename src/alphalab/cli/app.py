@@ -340,6 +340,14 @@ def _build_paper_run_parser(sub: argparse._SubParsersAction) -> None:  # type: i
         action="store_true",
         help="Explicitly request a dry run (this is already the default).",
     )
+    r.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Submit even when the quarterly schedule does not call for a "
+            "rebalance. This trades off the cadence the backtest measured."
+        ),
+    )
     _add_paper_common(r, with_prices=True)
 
 
@@ -385,6 +393,7 @@ def _dispatch_paper(args: argparse.Namespace, *, out: TextIO, err: TextIO, no_co
                 prices_dir=args.prices_dir,
                 halt_path=args.halt_file,
                 submit=bool(getattr(args, "submit", False)),
+                force=bool(getattr(args, "force", False)),
                 as_json=args.json,
                 no_color=no_color,
             ),
