@@ -160,6 +160,20 @@ class EdgarClient:
     def _parse_entry(
         self, ticker: Ticker, concept_name: str, entry: dict[str, object]
     ) -> PITRecord | None:
+        """Build a :class:`PITRecord` from one XBRL fact, or ``None`` if unusable.
+
+        EDGAR occasionally publishes *forward-looking* facts whose period ends
+        **after** the filing date (observed with ``CommonStockSharesAuthorized``
+        and ``DisposalGroupNotDiscontinuedOperationGainLossOnDisposal``: ``end``
+        in a quarter that had not closed when the filing went out). Those facts
+        violate the ``observed_at >= as_of`` domain invariant, which exists to
+        guarantee a datum is never attributed to a period it precedes.
+
+        Such facts are **skipped**, never coerced: shifting ``as_of`` to the
+        filing date would misstate the period, and relaxing the invariant would
+        weaken the anti-leakage guarantee for every other record. They are rare
+        (4 of ~30k facts for KO) and confined to non-core concepts.
+        """
         end = entry.get("end")
         filed = entry.get("filed")
         val = entry.get("val")
@@ -167,12 +181,16 @@ class EdgarClient:
             return None
         if not isinstance(val, int | float):
             return None
+        as_of = _parse_date(end)
+        observed_at = _parse_date(filed)
+        if observed_at < as_of:
+            return None
         return PITRecord(
             ticker=ticker,
             field=concept_name,
             value=float(val),
-            as_of=_parse_date(end),
-            observed_at=_parse_date(filed),
+            as_of=as_of,
+            observed_at=observed_at,
             source=_SOURCE,
         )
 
