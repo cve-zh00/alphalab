@@ -44,6 +44,7 @@ from alphalab.domain.schedule import Cadence
 
 __all__ = [
     "CadenceOutcome",
+    "SettleFn",
     "run_daily",
     "run_event",
     "run_monthly",
@@ -67,6 +68,13 @@ RealizedFn = Callable[[Prediction], tuple[float, float, float]]
 #: A sink that persists a settlement (e.g. the SQLite journal's ``settle``).
 PersistSettlementFn = Callable[[Settlement], None]
 
+#: Runs one settlement pass and returns ``(settled, pending, unpriced)`` counts.
+#: Injected so the daily cadence can *advance the forward clock* — liquidating
+#: due predictions — without the use case ever touching the journal or prices
+#: itself. Settlement is pure arithmetic over stored prices and spends no trial
+#: budget, which is why it belongs in the deterministic daily slot.
+SettleFn = Callable[[], tuple[int, int, int]]
+
 
 class CadenceOutcome(BaseModel):
     """Immutable summary of running one cadence.
@@ -88,27 +96,48 @@ class CadenceOutcome(BaseModel):
     calibration: CalibrationReport | None = None
 
 
-def run_daily(*, tickers: tuple[str, ...], refresh: RefreshFn, now: datetime) -> CadenceOutcome:
-    """Run the daily deterministic refresh. Never spends the trial budget.
+def run_daily(
+    *,
+    tickers: tuple[str, ...],
+    refresh: RefreshFn,
+    now: datetime,
+    settle: SettleFn | None = None,
+) -> CadenceOutcome:
+    """Run the daily deterministic refresh and (optionally) settle due theses.
 
     There is deliberately no LLM collaborator in this signature: the daily
     cadence updates data, screens and signal states only.
+
+    Settlement is what makes the forward clock *advance* — a dated thesis whose
+    horizon has passed becomes a scored outcome — and it is pure arithmetic
+    over already-stored prices, so it spends no trial budget and belongs in the
+    deterministic daily slot. It is injected (and optional) to keep this use
+    case free of the journal and price I/O; when wired, the settled/pending/
+    unpriced counts are reported alongside the refresh.
     """
     count = refresh(tickers)
     _ = now  # provenance only; the run decision belongs to due_runs.
+    produced = f"refreshed {count} tickers deterministically (no LLM)"
+    if settle is not None:
+        settled, pending, unpriced = settle()
+        produced += f"; settled {settled} due predictions ({pending} pending, {unpriced} unpriced)"
     return CadenceOutcome(
         cadence=Cadence.DAILY,
-        produced=f"refreshed {count} tickers deterministically (no LLM)",
+        produced=produced,
         spent_trial_budget=False,
     )
 
 
 def run_weekly(*, tickers: tuple[str, ...], analyse: AnalyseFn, now: datetime) -> CadenceOutcome:
-    """Run the weekly deep-dive over 1-3 names via the injected analyser.
+    """Run the weekly deep-dive over a configurable list of names.
 
-    ``analyse`` is wired to the analyst pipeline at the composition root. The
-    debate pipeline is a drop-in replacement for this callable and is not
-    imported here.
+    ``analyse`` is wired at the composition root to *investigate and register a
+    dated forecast* for each ticker — i.e. run the research pipeline and hand
+    the artifact to ``register_forecast``, returning a short status (registered
+    with its probability, or abstained with its reason). The debate pipeline is
+    a drop-in replacement for this callable and is not imported here. The
+    tickers are passed in, so the weekly watchlist is configurable by the
+    caller rather than hard-coded in the use case.
     """
     results = [analyse(ticker) for ticker in tickers]
     _ = now

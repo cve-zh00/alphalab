@@ -24,16 +24,27 @@ from typing import TextIO
 from alphalab.cli.commands import (
     CalibrationOptions,
     DoctorOptions,
+    JournalOptions,
     ResearchOptions,
     ScheduleOptions,
+    SettleOptions,
     run_calibration,
     run_doctor,
+    run_journal,
+    run_predict,
     run_research,
     run_schedule_generate,
+    run_settle,
+)
+from alphalab.cli.commands.predict import DEFAULT_HORIZON_DAYS, options_from_args
+from alphalab.cli.forecast_paths import (
+    default_abstention_db,
+    default_journal_db,
+    default_prices_dir,
 )
 
 _PROG = "alphalab"
-_DEFAULT_DB = Path("journal.db")
+_DEFAULT_DB = default_journal_db()
 
 
 def _project_root() -> Path:
@@ -64,9 +75,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     _build_research_parser(sub)
+    _build_predict_parser(sub)
+    _build_settle_parser(sub)
+    _build_journal_parser(sub)
     _build_calibration_parser(sub)
     _build_schedule_parser(sub)
     _build_doctor_parser(sub)
+    _build_run_cadence_parser(sub)
     return parser
 
 
@@ -99,6 +114,109 @@ def _build_research_parser(sub: argparse._SubParsersAction) -> None:  # type: ig
         "--provenance",
         action="store_true",
         help="Append the derivation tree of the headline number.",
+    )
+    _add_common_output_flags(p)
+
+
+def _build_predict_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    p = sub.add_parser(
+        "predict",
+        help="Research a ticker and record a forward-dated prediction (or abstain).",
+        description=(
+            "Run the research pipeline and record a dated, scoreable forecast — or a "
+            "stated abstention. An abstention is not an error (exit 0)."
+        ),
+    )
+    p.add_argument("ticker", nargs="+", help="One or more ticker symbols, e.g. AAPL MSFT.")
+    p.add_argument(
+        "--horizon-days",
+        type=int,
+        default=DEFAULT_HORIZON_DAYS,
+        help=f"Days until settlement (default: {DEFAULT_HORIZON_DAYS}).",
+    )
+    p.add_argument(
+        "--knowledge-date",
+        type=_parse_date,
+        default=date.today(),
+        help="Point-in-time knowledge date (YYYY-MM-DD; default: today).",
+    )
+    p.add_argument(
+        "--llm-cutoff",
+        type=_parse_date,
+        default=None,
+        help="Model training cutoff (YYYY-MM-DD); enables the anti-leakage gate.",
+    )
+    p.add_argument(
+        "--source",
+        choices=("fixture", "live"),
+        default="fixture",
+        help="Data source: 'fixture' (local prices, demo) or 'live' (SEC EDGAR).",
+    )
+    p.add_argument("--debate", action="store_true", help="Use the Bull/Bear/Judge debate pipeline.")
+    p.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="Use deterministic template narration (no Ollama, no 60s wait).",
+    )
+    p.add_argument(
+        "--assume-verdict",
+        choices=("buy", "sell", "hold"),
+        default=None,
+        help="Override the offline (--no-llm) verdict to exercise the flow; ignored with the LLM.",
+    )
+    p.add_argument(
+        "--db", type=Path, default=_DEFAULT_DB, help=f"Journal DB path (default: {_DEFAULT_DB})."
+    )
+    p.add_argument(
+        "--abstentions-db",
+        type=Path,
+        default=default_abstention_db(),
+        help=f"Abstention store path (default: {default_abstention_db()}).",
+    )
+    _add_common_output_flags(p)
+
+
+def _build_settle_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    p = sub.add_parser(
+        "settle",
+        help="Liquidate every due prediction from local prices (advances the clock).",
+        description=(
+            "Settle due predictions, pricing realized/benchmark moves from local close "
+            "series. Reports settled, pending, and could-not-price (with reasons)."
+        ),
+    )
+    p.add_argument(
+        "--db", type=Path, default=_DEFAULT_DB, help=f"Journal DB path (default: {_DEFAULT_DB})."
+    )
+    p.add_argument(
+        "--prices-dir",
+        type=Path,
+        default=default_prices_dir(),
+        help=f"Directory of <ticker>.csv close series (default: {default_prices_dir()}).",
+    )
+    p.add_argument(
+        "--as-of",
+        type=_parse_date,
+        default=date.today(),
+        help="Settlement date (YYYY-MM-DD; default: today).",
+    )
+    _add_common_output_flags(p)
+
+
+def _build_journal_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    p = sub.add_parser(
+        "journal",
+        help="List open and settled predictions (read-only history view).",
+        description="Show the accumulating forward record: open theses, settled outcomes.",
+    )
+    p.add_argument(
+        "--db", type=Path, default=_DEFAULT_DB, help=f"Journal DB path (default: {_DEFAULT_DB})."
+    )
+    p.add_argument(
+        "--abstentions-db",
+        type=Path,
+        default=default_abstention_db(),
+        help=f"Abstention store path (default: {default_abstention_db()}).",
     )
     _add_common_output_flags(p)
 
@@ -149,6 +267,14 @@ def _build_doctor_parser(sub: argparse._SubParsersAction) -> None:  # type: igno
     _add_common_output_flags(p)
 
 
+def _build_run_cadence_parser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    # Hidden entrypoint fired by the launchd plists that `schedule generate`
+    # writes. Not part of the user-facing surface, so it carries no help text.
+    p = sub.add_parser("_run-cadence")
+    p.add_argument("cadence", choices=("daily", "weekly", "monthly"))
+    _add_common_output_flags(p)
+
+
 def _parse_date(raw: str) -> date:
     try:
         return date.fromisoformat(raw)
@@ -196,6 +322,31 @@ def main(
             out=out,
             err=err,
         )
+    if args.command == "predict":
+        return run_predict(options_from_args(args, no_color=no_color), out=out, err=err)
+    if args.command == "settle":
+        return run_settle(
+            SettleOptions(
+                db_path=args.db,
+                prices_dir=args.prices_dir,
+                as_of=args.as_of,
+                as_json=args.json,
+                no_color=no_color,
+            ),
+            out=out,
+            err=err,
+        )
+    if args.command == "journal":
+        return run_journal(
+            JournalOptions(
+                db_path=args.db,
+                abstentions_path=args.abstentions_db,
+                as_json=args.json,
+                no_color=no_color,
+            ),
+            out=out,
+            err=err,
+        )
     if args.command == "calibration":
         return run_calibration(
             CalibrationOptions(db_path=args.db, as_json=args.json, no_color=no_color),
@@ -217,5 +368,9 @@ def main(
             out=out,
             err=err,
         )
+    if args.command == "_run-cadence":
+        from alphalab.cli.commands.run_cadence import run_cadence
+
+        return run_cadence(args.cadence, out=out, err=err, no_color=no_color)
     parser.print_help(err)  # pragma: no cover — argparse rejects unknown commands first
     return 2

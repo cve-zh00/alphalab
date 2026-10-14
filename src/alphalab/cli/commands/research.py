@@ -50,17 +50,15 @@ class ResearchOptions:
 def run_research(opts: ResearchOptions, *, out: TextIO, err: TextIO) -> int:
     """Execute the research command and return a process exit code."""
     try:
-        request, source_label = _build_request(opts)
+        artifact, request, source_label = build_research(opts)
     except FixtureNotFoundError as exc:
         print(f"error: {exc}", file=err)
         return 2
     except LiveIngestUnavailableError as exc:
         print(f"error: {exc}", file=err)
         return 1
-    try:
-        artifact = _run_pipeline(request, use_llm=opts.use_llm, debate=opts.debate)
     except Exception as exc:  # boundary: never leak a stack trace to the user
-        _report_pipeline_error(exc, use_llm=opts.use_llm, err=err)
+        report_pipeline_error(exc, use_llm=opts.use_llm, err=err)
         return 1
 
     if opts.as_json:
@@ -89,6 +87,20 @@ def _build_request(opts: ResearchOptions) -> tuple[AnalystRequest, str]:
         return request, "LIVE SEC EDGAR fundamentals"
     fixture = build_fixture_request(opts.ticker, knowledge_date=opts.knowledge_date)
     return fixture.request, fixture.source
+
+
+def build_research(opts: ResearchOptions) -> tuple[EquityResearchArtifact, AnalystRequest, str]:
+    """Run the research pipeline and return ``(artifact, request, source_label)``.
+
+    Shared by ``research`` (which renders the artifact) and ``predict`` (which
+    turns it into a dated forecast). Raising collaborators —
+    :class:`FixtureNotFoundError`, :class:`LiveIngestUnavailableError`, or a
+    pipeline failure — are left for the caller to translate into exit codes,
+    so both commands keep a single, consistent error policy.
+    """
+    request, source_label = _build_request(opts)
+    artifact = _run_pipeline(request, use_llm=opts.use_llm, debate=opts.debate)
+    return artifact, request, source_label
 
 
 def _run_pipeline(
@@ -145,7 +157,7 @@ def _run_debate(
     return pipeline.run(request).artifact
 
 
-def _report_pipeline_error(exc: Exception, *, use_llm: bool, err: TextIO) -> None:
+def report_pipeline_error(exc: Exception, *, use_llm: bool, err: TextIO) -> None:
     """Print an actionable, stack-trace-free error message."""
     print(f"error: analysis failed: {type(exc).__name__}: {exc}", file=err)
     if use_llm:

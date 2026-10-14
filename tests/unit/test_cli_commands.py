@@ -108,13 +108,17 @@ class TestCalibration:
         assert code == 0
         assert "nothing to calibrate" in out
 
-    def test_reports_calibration_from_settled_predictions(self, tmp_path: Path) -> None:
+    def test_small_sample_is_declared_inconclusive(self, tmp_path: Path) -> None:
+        """Two settled predictions must NOT be scored as if significant."""
         db = _journal_with_settlements(tmp_path)
         code, out, _ = _run(["calibration", "--db", str(db)])
         assert code == 0
         assert "CALIBRATION REPORT" in out
-        assert "Brier score" in out
-        assert "Reliability diagram" in out
+        assert "NOT conclusive" in out
+        assert "30 are needed" in out
+        # It must not pretend a Brier over 2 observations is meaningful.
+        assert "Brier score" not in out
+        assert "Reliability diagram" not in out
 
     def test_calibration_json(self, tmp_path: Path) -> None:
         db = _journal_with_settlements(tmp_path)
@@ -123,6 +127,7 @@ class TestCalibration:
         payload = json.loads(out)
         assert "brier" in payload
         assert payload["sample_size"] >= 1
+        assert payload["conclusive"] is False
 
 
 def _journal_with_settlements(tmp_path: Path) -> Path:

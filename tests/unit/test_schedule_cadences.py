@@ -177,3 +177,62 @@ def _due_predictions(*, count: int, horizon: date) -> tuple[Prediction, ...]:
         )
         for i in range(count)
     )
+
+
+# ---------------------------------------------------------------------------
+# Daily cadence — settlement is what advances the forward clock
+# ---------------------------------------------------------------------------
+def test_daily_settles_due_predictions_when_a_settler_is_injected() -> None:
+    # Arrange: a settler double returns (settled, pending, unpriced) counts.
+    calls: list[str] = []
+
+    def settle() -> tuple[int, int, int]:
+        calls.append("settled")
+        return (3, 2, 1)
+
+    now = datetime(2025, 7, 7, 22, 0)
+    # Act
+    outcome = run_daily(
+        tickers=("MSFT",),
+        refresh=lambda t: len(t),
+        now=now,
+        settle=settle,
+    )
+    # Assert: still no trial budget spent, and the settlement counts surface.
+    assert outcome.cadence is Cadence.DAILY
+    assert outcome.spent_trial_budget is False
+    assert calls == ["settled"]
+    assert "3" in outcome.produced  # settled count is reported
+
+
+def test_daily_without_settler_is_backward_compatible() -> None:
+    # Arrange / Act: the pre-existing signature still works unchanged.
+    outcome = run_daily(
+        tickers=("MSFT", "AAPL"),
+        refresh=lambda t: len(t),
+        now=datetime(2025, 7, 7, 22, 0),
+    )
+    # Assert
+    assert outcome.spent_trial_budget is False
+    assert "2" in outcome.produced
+
+
+# ---------------------------------------------------------------------------
+# Weekly cadence — investigate AND register a dated forecast
+# ---------------------------------------------------------------------------
+def test_weekly_predict_registers_for_each_name() -> None:
+    # Arrange: the analyse callable is wired to predict-and-register; it
+    # reports a per-ticker status string the cadence stitches together.
+    registered: list[str] = []
+
+    def predict(ticker: str) -> str:
+        registered.append(ticker)
+        return f"registered:{ticker}"
+
+    now = datetime(2025, 7, 13, 10, 0)
+    # Act
+    outcome = run_weekly(tickers=("MSFT", "NVDA"), analyse=predict, now=now)
+    # Assert
+    assert outcome.cadence is Cadence.WEEKLY
+    assert outcome.spent_trial_budget is True
+    assert registered == ["MSFT", "NVDA"]
