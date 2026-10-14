@@ -23,6 +23,14 @@ from alphalab.domain.backtest.signals import (
     momentum_signal,
     rank_ensemble_signal,
 )
+from alphalab.domain.backtest.turbulence import (
+    DEFAULT_LOOKBACK,
+    DEFAULT_MAX_ASSETS,
+    DEFAULT_PERCENTILE,
+    TurbulenceReading,
+    turbulence_reading,
+    turbulence_screened,
+)
 from alphalab.domain.backtest.types import (
     BacktestResult,
     PerformanceMetrics,
@@ -31,6 +39,9 @@ from alphalab.domain.backtest.types import (
 )
 
 __all__ = [
+    "DEFAULT_LOOKBACK",
+    "DEFAULT_MAX_ASSETS",
+    "DEFAULT_PERCENTILE",
     "TRADING_DAYS_PER_YEAR",
     "BacktestError",
     "BacktestResult",
@@ -41,6 +52,7 @@ __all__ = [
     "RelativePerformance",
     "SignalContext",
     "SignalFunction",
+    "TurbulenceReading",
     "TurnoverCostModel",
     "buy_and_hold",
     "equal_weight_signal",
@@ -51,4 +63,6 @@ __all__ = [
     "rank_ensemble_signal",
     "relative_performance",
     "run_backtest",
+    "turbulence_reading",
+    "turbulence_screened",
 ]

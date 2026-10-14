@@ -357,3 +357,141 @@ arXiv:2605.16895 (*The Alpha Illusion*).
 | `buy_cost_pct` / `sell_cost_pct` | Lineal. Sustituir por impacto de raíz cuadrada con ADV |
 | `tune_sb3.py` tal cual | Requiere registrar los 30 trials en un ledger y deflactar el Sharpe |
 | Cualquier Sharpe reportado | Sin deflactar ni PBO, no distingue señal de la mediana del ruido |
+
+---
+
+## 7. Cascada al ecosistema AI4Finance (39 repos no-fork)
+
+| Repo | Stars | Licencia | Últ. push | Nota |
+|---|---|---|---|---|
+| FinGPT | 21 399 | MIT | 2026-09-23 | Jupyter. Componente de análisis |
+| FinRL | 16 638 | MIT | 2026-10-13 | §6 |
+| FinRobot | 8 212 | Apache-2.0 | 2026-09-28 | §1 |
+| **ElegantRL** | 4 368 | **NOASSERTION** ⚠️ | 2026-02-20 | Ver §7.1 |
+| FinRL-Trading | 3 815 | Apache-2.0 | 2026-09-18 | No inspeccionado |
+| FinRL-Meta | 1 949 | MIT | 2026-10-12 | `slippage` en 8 archivos — más que FinRL |
+| FinNLP | 1 492 | MIT | 2024-07-01 | Sin mantenimiento >2 años |
+| **FinRL_Crypto** | 204 | MIT | 2025-12-15 | **El único con controles de overfitting.** Ver §7.2 |
+| FinML | 181 | **NULL** | 2024-02-27 | Sin licencia |
+| Quantifying-ESG-Alpha | 77 | **NULL** | 2021-01-12 | Sin licencia, abandonado |
+
+### 7.1 ElegantRL: licencia contradictoria, y FinRL depende de ella
+
+La API de GitHub reporta `NOASSERTION` / "Other". El motivo está en el propio
+archivo `LICENSE`:
+
+```
+Copyright 2024 AI4Finance Foundation Inc.
+All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+```
+
+**"All rights reserved" seguido de Apache-2.0 es contradictorio**, y por eso el
+clasificador de GitHub no la resuelve. Probablemente la intención sea Apache-2.0
+con una línea de copyright mal copiada, pero la ambigüedad es real — y
+**`elegantrl` figura en el `requirements.txt` de FinRL**. Un repo MIT depende de
+un paquete cuya licencia no se puede determinar automáticamente. Es un riesgo de
+cadena de suministro legal, menor que el de AI-Trader (que no tiene licencia en
+absoluto) pero digno de registro. `FinRL_Podracer` tiene el mismo problema.
+
+### 7.2 FinRL_Crypto: los controles existen, pero aislados
+
+Commit `495a428`, 40 archivos Python, MIT. El grep crítico, que daba casi todo
+cero en FinRL, aquí da:
+
+| Término | Archivos |
+|---|---|
+| `pbo` | **4** |
+| `k-fold` | **4** |
+| `purge` | **2** |
+| `embargo` | **2** |
+| `deflated` | **1** |
+| `walk-forward` | **1** |
+
+Contiene `function_CPCV.py` con `class CombPurgedKFoldCV` — **Combinatorial
+Purged K-Fold Cross-Validation con embargo**, el toolkit de López de Prado
+implementado de verdad, con su docstring explicando el purgado de muestras
+solapadas y el periodo de embargo. Más `function_PBO.py` y un script `5_pbo.py`.
+Su README declara explícitamente el objetivo: *"Address Overfitting DRL Agents"*.
+
+**La conclusión del ecosistema es esta asimetría:** AI4Finance *sabe* cómo
+evaluar honestamente, y lo demuestra en un repo de **204 stars**. Su flagship de
+**16 638 stars** — el que la gente clona, cita y del que extrae conclusiones — no
+usa nada de eso, y además incluye un optimizador que busca 30 configuraciones
+sobre Sharpe sin deflactar. Los controles existen pero no están donde importan.
+
+Nota sobre purging y embargo para este proyecto: no se incorporaron porque no
+aplican. El purgado corrige solapamiento entre muestras de entrenamiento y test
+cuando las etiquetas abarcan varios periodos; aquí los rebalanceos son
+trimestrales y contiguos, sin solapamiento, y las tiras del CSCV en
+`domain/stats/pbo.py` no comparten observaciones. Añadir la maquinaria habría
+sido ceremonia sin efecto.
+
+---
+
+## 8. Lo único que se incorporó, y su medición
+
+El usuario impuso la regla correcta: **si se incorpora algo, hay que medirlo de
+verdad.** De todo el ecosistema solo un componente pasó el filtro de "vale la
+pena probarlo": el **índice de turbulencia** de FinRL, por ser la única pieza con
+disciplina temporal correcta y por atacar un problema real de este proyecto (los
+drawdowns de −72% a −85% del momentum sobre el universo honesto).
+
+Implementado en `domain/backtest/turbulence.py` con dos mejoras sobre la fuente:
+umbral point-in-time (percentil de la propia ventana rodante, no de la muestra
+completa) y sin ejecución en la misma barra.
+
+### 8.1 Primer resultado: un bug, no una señal
+
+Aplicado al universo completo, el overlay quedaba en efectivo el **86% de los
+rebalanceos, idéntico para todo percentil** (80, 90, 95). Diagnóstico:
+
+```
+activos con historia completa (p): 336
+observaciones en la ventana  (n): 252
+ratio p/n: 1.333                       <- covarianza SINGULAR por construccion
+turbulencia 1707.5 vs umbral p90 249.0 -> 6.9x
+FinRL usa Dow 30: p/n = 0.119          <- bien condicionado
+```
+
+Con más activos que observaciones la covarianza muestral es singular y `pinv`
+infla la distancia de cualquier punto fuera del sample. **El índice medía
+dimensionalidad, no estrés de mercado.** FinRL no tropieza con esto solo porque
+lo aplica al Dow 30.
+
+Reparación: cap de 30 activos, los más líquidos, seleccionados point-in-time.
+`p/n` vuelve a 0.119, el ratio baja de 6.9x a 0.45x y los percentiles por fin
+discriminan (11%, 21% y 39% de efectivo).
+
+### 8.2 Segundo resultado: mejora aparente que no pasa el control
+
+Universo honesto, out-of-sample 2018-2024:
+
+| Variante | SR net | CAGR | maxDD | % efectivo |
+|---|---|---|---|---|
+| momentum solo (baseline) | 0.171 | −1.18% | −72.1% | 0% |
+| + turbulencia p80 | **0.266** | 3.43% | −63.4% | 39% |
+| + turbulencia p90 | 0.264 | 2.85% | **−54.3%** | 21% |
+| + turbulencia p95 | 0.241 | 1.76% | −64.2% | 11% |
+
+Leído así es tentador: +0.095 de Sharpe y 18 puntos menos de drawdown. Pero la
+pregunta correcta no es "¿mejoró?" sino **"¿mejoró más que reducir exposición sin
+mirar nada?"**. Control: estar en efectivo **al azar** en la misma fracción de
+rebalanceos, 40 semillas:
+
+```
+p80 (cash 39%): turbulencia +0.266  vs azar mediana +0.148  p95 +0.364  -> percentil 82%
+p90 (cash 21%): turbulencia +0.264  vs azar mediana +0.181  p95 +0.351  -> percentil 78%
+p95 (cash 11%): turbulencia +0.241  vs azar mediana +0.206  p95 +0.295  -> percentil 72%
+```
+
+**Ninguno alcanza el percentil 95.** La mejora no es distinguible de simplemente
+estar menos invertido. El código queda en el repo con el veredicto escrito en su
+docstring y bloqueado en tests —el diagnóstico de `p/n` es un hallazgo real sobre
+el método, y el resultado negativo vale conservarlo— pero **no está avalado como
+fuente de alfa**.
+
+Regla que deja esta medición, y que aplica a cualquier overlay futuro:
+**todo mecanismo que reduzca exposición debe superar el control de abstención
+aleatoria a la misma frecuencia antes de poder llamarse habilidad.**
