@@ -26,3 +26,8 @@ def pytest_configure(config: pytest.Config) -> None:
         "edgar_live: real end-to-end test that hits the live SEC EDGAR API "
         "(opt-in via ALPHALAB_LIVE_TESTS=1).",
     )
+    config.addinivalue_line(
+        "markers",
+        "alpaca_live: real end-to-end test that hits the live Alpaca API "
+        "(opt-in via ALPHALAB_ALPACA_LIVE_TESTS=1).",
+    )
