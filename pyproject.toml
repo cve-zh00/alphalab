@@ -31,6 +31,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/alphalab"]
 
+[project.scripts]
+alphalab = "alphalab.cli:main"
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
