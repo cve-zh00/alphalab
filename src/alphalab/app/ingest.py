@@ -179,11 +179,25 @@ def _latest_knowable_record(
     field_name: FundamentalField,
     kd: KnowledgeDate,
 ) -> PITRecord | None:
-    """Return the most recently filed record knowable at ``kd`` (or ``None``)."""
+    """Return the record for the latest period knowable at ``kd`` (or ``None``).
+
+    Ranking is by *period* first and filing date only as a tiebreak, because a
+    single filing restates several years at once: a 10-K carries this year's
+    figure alongside the two before it, all stamped with the same ``filed``
+    date. Ranking by filing date alone leaves those tied, and the winner then
+    falls out of whatever order the store happened to return — for AMD, the
+    FY2023 diluted EPS of 0.53 instead of FY2025's 2.65, a figure two years
+    stale and less than half the right size.
+
+    Within one period the later filing still wins, so a restatement supersedes
+    the original it corrects. The anti-leakage guarantee is untouched: the
+    store has already dropped everything filed after ``kd``, so this only ever
+    chooses among records that were genuinely knowable.
+    """
     rows = store.query(ticker=ticker, field=str(field_name), knowledge_date=kd)
     if not rows:
         return None
-    return max(rows, key=lambda r: r.observed_at)
+    return max(rows, key=lambda r: (r.as_of, r.observed_at))
 
 
 def latest_knowable_value(
