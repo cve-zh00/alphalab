@@ -32,21 +32,36 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import date
-from typing import Protocol
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from alphalab.artifact import EquityResearchArtifact, Verdict
+from alphalab.domain.compute.sectors import resolve_sector_profile
+from alphalab.domain.contract.gate import conservative_c1b_upside
 from alphalab.domain.types import Ticker
 
 __all__ = [
     "DEFAULT_MAX_POSITIONS",
+    "DEFAULT_MAX_SECTOR_WEIGHT",
     "MIN_EVALUATED_FRACTION",
     "AgenticPlan",
     "ResearchFunction",
+    "SizingMode",
     "TickerOutcome",
     "build_agentic_targets",
+    "conviction_volatility_targets",
+    "equal_weight_targets",
+    "resolve_sectors",
 ]
+
+#: Default cap on the total weight of any one sector.
+DEFAULT_MAX_SECTOR_WEIGHT = 0.25
+
+#: Average pairwise correlation above which a name's score is penalized.
+CORRELATION_PENALTY_THRESHOLD = 0.60
+
+SizingMode = Literal["equal", "conviction"]
 
 #: Names held when the pipeline approves at least that many.
 DEFAULT_MAX_POSITIONS = 20
@@ -76,6 +91,8 @@ class TickerOutcome(BaseModel):
     ticker: Ticker
     verdict: Verdict | None = None
     detail: str = ""
+    upside: float | None = None
+    relative_span: float | None = None
 
     @property
     def approved(self) -> bool:
@@ -114,8 +131,14 @@ def build_agentic_targets(
     research: ResearchFunction,
     max_positions: int = DEFAULT_MAX_POSITIONS,
     min_evaluated_fraction: float = MIN_EVALUATED_FRACTION,
+    volatilities: Mapping[Ticker, float] | None = None,
+    sizing_mode: SizingMode = "equal",
+    max_position_weight: float = 0.10,
+    correlations: Mapping[Ticker, float] | None = None,
+    sectors: Mapping[Ticker, str] | None = None,
+    max_sector_weight: float = DEFAULT_MAX_SECTOR_WEIGHT,
 ) -> AgenticPlan:
-    """Research every candidate and equal-weight the approvals.
+    """Research every candidate and compute portfolio weights for approvals.
 
     A candidate that raises is recorded and skipped rather than aborting the
     cycle: one unreachable filing should not discard twenty completed
@@ -145,15 +168,31 @@ def build_agentic_targets(
         evaluated=evaluated,
         min_fraction=min_evaluated_fraction,
     )
-    held = sorted(approved)[:max_positions] if actionable else []
-    weight = 1.0 / max_positions if held else 0.0
+    held = approved[:max_positions] if actionable else []
+    if not held:
+        targets: dict[Ticker, float] = {}
+    elif sizing_mode == "conviction":
+        outcome_by_ticker = {o.ticker: o for o in outcomes}
+        targets = conviction_volatility_targets(
+            held,
+            slots=max_positions,
+            outcomes=outcome_by_ticker,
+            volatilities=volatilities,
+            max_weight=max_position_weight,
+            correlations=correlations,
+            sectors=resolve_sectors(held, sectors),
+            max_sector_weight=max_sector_weight,
+        )
+    else:
+        weight = 1.0 / max_positions
+        targets = {t: weight for t in held}
 
     if actionable and not held:
         plan_note = "pipeline approved no names; holding cash"
 
     return AgenticPlan(
         as_of=as_of,
-        targets={t: weight for t in held},
+        targets=targets,
         outcomes=tuple(outcomes),
         candidates=len(candidates),
         evaluated=evaluated,
@@ -170,10 +209,25 @@ def _research_one(ticker: Ticker, research: ResearchFunction) -> TickerOutcome:
         return TickerOutcome(ticker=ticker, detail=f"research failed: {type(exc).__name__}: {exc}")
     if artifact is None:
         return TickerOutcome(ticker=ticker, detail="insufficient data to assess")
+    upside: float | None = None
+    if (
+        not artifact.valuation_withheld
+        and artifact.price_target is not None
+        and artifact.current_price > 0.0
+    ):
+        upside = artifact.price_target.value / artifact.current_price - 1.0
+    detail = "valuation withheld by contract gate" if artifact.valuation_withheld else ""
+    if upside is None:
+        conservative = conservative_c1b_upside(artifact)
+        if conservative is not None:
+            upside = conservative
+            detail = "conservative C1b target"
     return TickerOutcome(
         ticker=ticker,
         verdict=artifact.verdict,
-        detail="valuation withheld by contract gate" if artifact.valuation_withheld else "",
+        detail=detail,
+        upside=upside,
+        relative_span=artifact.consensus_relative_span,
     )
 
 
@@ -204,3 +258,104 @@ def equal_weight_targets(tickers: Sequence[Ticker], *, slots: int) -> dict[Ticke
         raise ValueError("slots must be positive")
     held = sorted(tickers)[:slots]
     return {t: 1.0 / slots for t in held}
+
+
+def conviction_volatility_targets(
+    tickers: Sequence[Ticker],
+    *,
+    slots: int,
+    outcomes: Mapping[Ticker, TickerOutcome] | None = None,
+    volatilities: Mapping[Ticker, float] | None = None,
+    max_weight: float = 0.10,
+    correlations: Mapping[Ticker, float] | None = None,
+    sectors: Mapping[Ticker, str] | None = None,
+    max_sector_weight: float = DEFAULT_MAX_SECTOR_WEIGHT,
+) -> dict[Ticker, float]:
+    """Weight approved names by ``conviction / sigma_60d``, bounded by ``max_weight``.
+
+    * **Conviction** increases with dispersion-adjusted Margin of Safety
+      ``min(max(upside, 0) / max(span, 0.15), 2.0)`` in ``[1.0, 2.0]`` (or
+      ``0.75`` when valuation was withheld).
+    * **Inverse volatility** scales down high-volatility names using 60-day
+      annualized volatility clamped to ``[0.10, 0.80]``.
+    * **Approval-count scaling**: each approved name receives a base budget of
+      ``min(max_weight, max(1 / slots, 0.075))`` scaled by its relative
+      conviction/volatility score and clipped to ``[0.01, max_weight]``, with
+      gross exposure capped at ``1.0``.
+    """
+    if slots <= 0:
+        raise ValueError("slots must be positive")
+    if max_weight <= 0.0 or max_weight > 1.0:
+        raise ValueError("max_weight must be in (0, 1]")
+    if max_sector_weight <= 0.0 or max_sector_weight > 1.0:
+        raise ValueError("max_sector_weight must be in (0, 1]")
+    held = list(dict.fromkeys(tickers))[:slots]
+    if not held:
+        return {}
+
+    raw_scores: dict[Ticker, float] = {}
+    for ticker in held:
+        outcome = outcomes.get(ticker) if outcomes is not None else None
+        if outcome is None or outcome.upside is None:
+            conviction = 0.75 if (outcome and "withheld" in outcome.detail) else 1.0
+        else:
+            span = max(outcome.relative_span or 0.15, 0.15)
+            mos_ratio = min(max(0.0, outcome.upside) / span, 2.0)
+            conviction = 1.0 + 0.5 * mos_ratio
+        raw_vol = volatilities.get(ticker, 0.25) if volatilities is not None else 0.25
+        sigma = max(0.10, min(0.80, raw_vol if raw_vol > 0.0 else 0.25))
+        score = conviction / sigma
+        avg_corr = correlations.get(ticker) if correlations is not None else None
+        if avg_corr is not None and avg_corr > CORRELATION_PENALTY_THRESHOLD:
+            score *= max(0.5, 1.0 - 0.5 * (avg_corr - CORRELATION_PENALTY_THRESHOLD))
+        raw_scores[ticker] = score
+
+    mean_score = sum(raw_scores.values()) / len(held)
+    base_slot = min(max_weight, max(1.0 / slots, 0.075))
+    weights: dict[Ticker, float] = {}
+    for ticker in held:
+        rel = raw_scores[ticker] / mean_score if mean_score > 0.0 else 1.0
+        w = min(max_weight, max(0.01, base_slot * rel))
+        weights[ticker] = w
+
+    total = sum(weights.values())
+    if total > 1.0:
+        scale = 1.0 / total
+        weights = {t: w * scale for t, w in weights.items()}
+    if sectors is not None:
+        weights = _apply_sector_cap(weights, sectors, max_sector_weight)
+    return weights
+
+
+def resolve_sectors(
+    tickers: Sequence[Ticker], sectors: Mapping[Ticker, str] | None
+) -> dict[Ticker, str]:
+    """Use supplied sectors, falling back to the static sector profile."""
+    out: dict[Ticker, str] = {}
+    for t in tickers:
+        known = sectors.get(t) if sectors is not None else None
+        if known:
+            out[t] = known
+            continue
+        sector = str(resolve_sector_profile(t).sector.value)
+        # Unclassified names are not one real sector; never cap them together.
+        out[t] = "" if sector == "market_default" else sector
+    return out
+
+
+def _apply_sector_cap(
+    weights: dict[Ticker, float], sectors: Mapping[Ticker, str], cap: float
+) -> dict[Ticker, float]:
+    """Scale each over-cap sector down to exactly ``cap`` (others untouched)."""
+    totals: dict[str, float] = {}
+    for t, w in weights.items():
+        sector = sectors.get(t)
+        if sector:
+            totals[sector] = totals.get(sector, 0.0) + w
+    out = dict(weights)
+    for t, w in weights.items():
+        sector = sectors.get(t)
+        if sector and totals[sector] > cap:
+            out[t] = w * cap / totals[sector]
+    return out
+

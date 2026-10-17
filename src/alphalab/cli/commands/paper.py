@@ -161,7 +161,12 @@ def _build_runner(
     return runner, log, kill_switch
 
 
-def _price_provider(settings: AlpacaSettings, prices_dir: Path) -> PriceProvider:
+def _price_provider(
+    settings: AlpacaSettings,
+    prices_dir: Path,
+    *,
+    tickers: Sequence[Ticker] | None = None,
+) -> PriceProvider:
     """Prefer live Alpaca bars; fall back to local CSVs only if asked.
 
     A system left running must decide from fresh prices. The CSV provider reads
@@ -175,15 +180,15 @@ def _price_provider(settings: AlpacaSettings, prices_dir: Path) -> PriceProvider
     from alphalab.cli.alpaca_prices import AlpacaPriceProvider
     from alphalab.cli.paper_transport import HttpxWriteTransport
 
+    resolved = list(tickers) if tickers is not None else _universe_tickers(prices_dir)
     if os.environ.get("ALPHALAB_PAPER_PRICES", "live").lower() == "csv":
-        return _CsvPriceProvider(prices_dir, tickers=_universe_tickers(prices_dir))
+        return _CsvPriceProvider(prices_dir, tickers=resolved)
 
     feed = DataFeed(os.environ.get("ALPHALAB_ALPACA_FEED", "sip").lower())
     client = AlpacaBarsClient(settings, transport=HttpxWriteTransport(), feed=feed)
     return AlpacaPriceProvider(
         client,
-        tickers=_universe_tickers(prices_dir),
-        today=datetime.now(UTC).date(),
+        tickers=resolved,
     )
 
 

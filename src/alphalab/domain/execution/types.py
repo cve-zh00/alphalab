@@ -56,6 +56,11 @@ class RiskLimits(BaseModel):
     #: down 72.1% where twenty drew down 43.9%.
     max_position_weight: float = Field(default=0.10, gt=0.0, le=1.0)
 
+    #: Ceiling for already-held positions that grew via appreciation. New buys
+    #: and increases are still capped by ``max_position_weight``; a held
+    #: position above that limit is only trimmed once it exceeds this ceiling.
+    max_drift_weight: float = Field(default=0.12, gt=0.0, le=1.0)
+
     #: Largest notional a single order may carry, as a fraction of equity.
     #: Caps the damage a mispriced or stale signal can do in one step.
     max_order_weight: float = Field(default=0.25, gt=0.0, le=1.0)

@@ -71,10 +71,14 @@ class CikResolver:
         """
         mapping = self._mapping()
         key = str(ticker).upper()
-        try:
-            return mapping[key]
-        except KeyError as exc:
-            raise KeyError(f"ticker {ticker!r} not found in SEC CIK map") from exc
+        cik = (
+            mapping.get(key)
+            or mapping.get(key.replace(".", "-"))
+            or mapping.get(key.replace("-", "."))
+        )
+        if cik is None:
+            raise KeyError(f"ticker {ticker!r} not found in SEC CIK map")
+        return cik
 
     def _mapping(self) -> dict[str, str]:
         if self._by_ticker is None:

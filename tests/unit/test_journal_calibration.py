@@ -185,3 +185,31 @@ class TestCalibrationReport:
         # Assert
         assert report.conclusive is True
         assert math.isclose(report.hit_rate, sum(outs) / n)
+
+
+class TestWinklerAndOverconfidencePenalty:
+    def test_winkler_score_penalizes_misses_outside_interval(self) -> None:
+        from alphalab.domain.journal.calibration import winkler_score
+
+        inside = winkler_score([90.0], [110.0], [100.0], alpha=0.20)
+        outside = winkler_score([90.0], [110.0], [120.0], alpha=0.20)
+        assert inside == pytest.approx(20.0)
+        assert outside == pytest.approx(20.0 + (2.0 / 0.20) * 10.0)
+
+    def test_overconfidence_penalty_shrinks_forecast_probability(self) -> None:
+        from alphalab.domain.forecast.probability import BASE_RATE, forecast_probability
+
+        raw = forecast_probability(
+            implied_upside=0.30,
+            relative_span=0.15,
+            valuation_withheld=False,
+        )
+        shrunk = forecast_probability(
+            implied_upside=0.30,
+            relative_span=0.15,
+            valuation_withheld=False,
+            overconfidence_penalty=0.08,
+        )
+        assert shrunk < raw
+        assert shrunk >= BASE_RATE
+

@@ -287,6 +287,17 @@ class SqliteJournal:
             row = cur.fetchone()
         return _row_to_prediction(row) if row is not None else None
 
+    def find_prediction_for_date(self, ticker: str, knowledge_date: date) -> Prediction | None:
+        """Return an existing prediction for ``(ticker, knowledge_date)`` if already recorded."""
+        with closing(self._conn.cursor()) as cur:
+            cur.execute(
+                f"SELECT {_PREDICTION_COLUMNS} FROM predictions "
+                "WHERE ticker = ? AND knowledge_date = ? ORDER BY recorded_at LIMIT 1",
+                (ticker, knowledge_date.isoformat()),
+            )
+            row = cur.fetchone()
+        return _row_to_prediction(row) if row is not None else None
+
     def get_settlement(self, prediction_id: str) -> Settlement | None:
         """Return the settlement for ``prediction_id`` or ``None`` if unsettled."""
         with closing(self._conn.cursor()) as cur:

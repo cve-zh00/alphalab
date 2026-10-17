@@ -29,6 +29,7 @@ from alphalab.domain.journal.calibration import (
     expected_calibration_error,
     overconfidence,
     reliability_diagram,
+    winkler_score,
 )
 from alphalab.domain.journal.errors import (
     JournalError,
@@ -84,4 +85,5 @@ __all__ = [
     "overconfidence",
     "reliability_diagram",
     "settle_prediction",
+    "winkler_score",
 ]

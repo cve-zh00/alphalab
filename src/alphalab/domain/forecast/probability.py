@@ -55,6 +55,7 @@ def forecast_probability(
     implied_upside: float | None,
     relative_span: float | None,
     valuation_withheld: bool,
+    overconfidence_penalty: float = 0.0,
 ) -> float:
     """Confidence that a directional call will be right, in ``[BASE_RATE, MAX_CONFIDENCE]``.
 
@@ -74,13 +75,18 @@ def forecast_probability(
             sign is ignored, since direction is carried separately.
         relative_span: Dispersion across valuation methods, as a fraction.
         valuation_withheld: Whether the contract gate suppressed the figure.
+        overconfidence_penalty: Optional positive shrinkage derived from
+            observed journal overconfidence ``mean(p) - mean(outcome)``.
     """
     if valuation_withheld or implied_upside is None or relative_span is None:
         return BASE_RATE
 
     evidence = _evidence_ratio(abs(implied_upside), relative_span)
     headroom = MAX_CONFIDENCE - BASE_RATE
-    return BASE_RATE + headroom * math.tanh(evidence / EVIDENCE_SCALE)
+    raw = BASE_RATE + headroom * math.tanh(evidence / EVIDENCE_SCALE)
+    if overconfidence_penalty > 0.0:
+        raw = max(BASE_RATE, raw - overconfidence_penalty)
+    return min(MAX_CONFIDENCE, raw)
 
 
 def _evidence_ratio(upside: float, span: float) -> float:

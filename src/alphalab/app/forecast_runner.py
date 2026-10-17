@@ -34,12 +34,17 @@ from alphalab.adapters.journal_sqlite import SqliteJournal
 from alphalab.adapters.prices import PricePoint, PriceSeriesSource
 from alphalab.artifact.models import EquityResearchArtifact, Verdict
 from alphalab.domain.backtest import ProportionalCostModel
+from alphalab.domain.contract.gate import conservative_c1b_upside
 from alphalab.domain.forecast import Abstention, ForecastInputs, build_forecast
 from alphalab.domain.journal import (
     Direction,
+    Lesson,
     Prediction,
+    Reflector,
     Settlement,
+    TemplateReflector,
     due_predictions,
+    overconfidence,
     settle_prediction,
 )
 from alphalab.domain.types import Ticker
@@ -95,6 +100,7 @@ def register_forecast(
     abstentions: SqliteAbstentionStore,
     llm_version: str | None = None,
     llm_cutoff: date | None = None,
+    overconfidence_penalty: float | None = None,
 ) -> Prediction | Abstention:
     """Convert a research artifact into a persisted forecast or abstention.
 
@@ -113,6 +119,8 @@ def register_forecast(
         abstentions: Store that receives any abstention.
         llm_version: Version string of the model that produced the research.
         llm_cutoff: Training cutoff of that model; drives the anti-leakage gate.
+        overconfidence_penalty: Optional shrinkage applied when calibration
+            history shows positive overconfidence.
 
     Returns:
         The :class:`Prediction` or :class:`Abstention` that was persisted.
@@ -126,6 +134,11 @@ def register_forecast(
     knowledge_date = _require_knowledge_date(artifact)
     _reject_leakage(knowledge_date, llm_cutoff)
 
+    effective_penalty = (
+        overconfidence_penalty
+        if overconfidence_penalty is not None
+        else _derive_overconfidence_penalty(journal)
+    )
     inputs = _artifact_to_inputs(artifact, knowledge_date)
     result = build_forecast(
         inputs,
@@ -133,12 +146,35 @@ def register_forecast(
         recorded_at=recorded_at,
         llm_version=llm_version,
         llm_cutoff=llm_cutoff,
+        overconfidence_penalty=effective_penalty,
     )
     if isinstance(result, Abstention):
         abstentions.record(result)
     else:
         journal.record(result)
     return result
+
+
+def _derive_overconfidence_penalty(journal: SqliteJournal) -> float:
+    """Compute a damped overconfidence shrinkage from settled journal history."""
+    settlements = {s.prediction_id: s for s in journal.list_settlements()}
+    if len(settlements) < 10:
+        return 0.0
+    preds = {p.prediction_id: p for p in journal.list_predictions()}
+    probs: list[float] = []
+    outs: list[int] = []
+    for pid, s in settlements.items():
+        pred = preds.get(pid)
+        if pred is not None:
+            probs.append(pred.probability)
+            outs.append(1 if s.outcome else 0)
+    if len(probs) < 10:
+        return 0.0
+    signed_oc = overconfidence(probs, outs)
+    if signed_oc <= 0.0:
+        return 0.0
+    damping = min(1.0, len(probs) / 30.0)
+    return signed_oc * damping
 
 
 def _require_knowledge_date(artifact: EquityResearchArtifact) -> date:
@@ -172,7 +208,8 @@ def _artifact_to_inputs(artifact: EquityResearchArtifact, knowledge_date: date) 
         direction=_verdict_to_direction(artifact.verdict),
         implied_upside=_implied_upside(artifact),
         relative_span=artifact.consensus_relative_span,
-        valuation_withheld=artifact.valuation_withheld,
+        valuation_withheld=artifact.valuation_withheld
+        and conservative_c1b_upside(artifact) is None,
     )
 
 
@@ -193,7 +230,9 @@ def _implied_upside(artifact: EquityResearchArtifact) -> float | None:
     fabricating support the contract gate deliberately suppressed.
     """
     if artifact.valuation_withheld or artifact.price_target is None:
-        return None
+        # C1b-only degradation with directionally agreeing methods keeps a
+        # conservative upside derived from the range; hard withholds do not.
+        return conservative_c1b_upside(artifact)
     return artifact.price_target.value / artifact.current_price - 1.0
 
 
@@ -208,6 +247,7 @@ class SettlementOutcome:
 
     prediction: Prediction
     settlement: Settlement
+    lesson: Lesson | None = None
 
 
 @dataclass(frozen=True)
@@ -228,6 +268,7 @@ class SettlementRun:
 
     settled: tuple[SettlementOutcome, ...]
     skipped: tuple[SkippedSettlement, ...]
+    lessons: tuple[Lesson, ...] = ()
 
 
 def settle_due_predictions(
@@ -239,6 +280,7 @@ def settle_due_predictions(
     cost_model: ProportionalCostModel,
     benchmark: Ticker = DEFAULT_BENCHMARK,
     max_staleness_days: int = DEFAULT_PRICE_STALENESS_DAYS,
+    reflector: Reflector | None = None,
 ) -> SettlementRun:
     """Settle every due, unsettled prediction from real price series.
 
@@ -257,12 +299,14 @@ def settle_due_predictions(
     second pass settles nothing and never collides with the journal's
     immutability triggers.
     """
+    active_reflector = reflector if reflector is not None else TemplateReflector()
     benchmark_series = prices.series(benchmark)
     due = due_predictions(
         journal.list_predictions(), settled_ids=journal.settled_ids(), as_of=as_of
     )
     settled: list[SettlementOutcome] = []
     skipped: list[SkippedSettlement] = []
+    lessons: list[Lesson] = []
     for prediction in due:
         outcome = _settle_one(
             prediction,
@@ -278,8 +322,25 @@ def settle_due_predictions(
             skipped.append(outcome)
         else:
             journal.settle(outcome.settlement)
-            settled.append(outcome)
-    return SettlementRun(settled=tuple(settled), skipped=tuple(skipped))
+            lesson = active_reflector.reflect(
+                outcome.prediction,
+                outcome.settlement,
+            )
+            if journal.get_lesson(outcome.prediction.prediction_id) is None:
+                journal.add_lesson(lesson)
+            lessons.append(lesson)
+            settled.append(
+                SettlementOutcome(
+                    prediction=outcome.prediction,
+                    settlement=outcome.settlement,
+                    lesson=lesson,
+                )
+            )
+    return SettlementRun(
+        settled=tuple(settled),
+        skipped=tuple(skipped),
+        lessons=tuple(lessons),
+    )
 
 
 def _settle_one(

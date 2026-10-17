@@ -69,6 +69,7 @@ def build_forecast(
     recorded_at: datetime,
     llm_version: str | None = None,
     llm_cutoff: date | None = None,
+    overconfidence_penalty: float = 0.0,
 ) -> Prediction | Abstention:
     """Produce a dated, scoreable prediction, or an abstention explaining why not.
 
@@ -102,6 +103,7 @@ def build_forecast(
         implied_upside=inputs.implied_upside,
         relative_span=inputs.relative_span,
         valuation_withheld=inputs.valuation_withheld,
+        overconfidence_penalty=overconfidence_penalty,
     )
     return Prediction(
         prediction_id=new_prediction_id(),

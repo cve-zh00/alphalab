@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date
 from typing import Protocol
 
 from pydantic import Field
@@ -27,8 +27,31 @@ from alphalab.domain.pit import PITRecord
 from alphalab.domain.types import Ticker
 
 _BASE_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 _SOURCE = "SEC-EDGAR"
+_8K_ITEM_LABELS: dict[str, str] = {
+    "1.01": "Entry into a Material Definitive Agreement",
+    "1.02": "Termination of a Material Definitive Agreement",
+    "1.03": "Bankruptcy or Receivership",
+    "2.01": "Completion of Acquisition or Disposition of Assets",
+    "2.02": "Results of Operations and Financial Condition",
+    "2.03": "Creation of a Direct Financial Obligation",
+    "2.04": "Triggering Events That Accelerate or Increase a Direct Financial Obligation",
+    "2.05": "Costs Associated with Exit or Disposal Activities",
+    "2.06": "Material Impairments",
+    "3.01": "Notice of Delisting or Failure to Satisfy a Continued Listing Rule",
+    "3.02": "Unregistered Sales of Equity Securities",
+    "4.01": "Changes in Registrant's Certifying Accountant",
+    "4.02": "Non-Reliance on Previously Issued Financial Statements or Restatements",
+    "5.01": "Changes in Control of Registrant",
+    "5.02": "Departure or Election of Directors or Principal Officers",
+    "5.03": "Amendments to Articles of Incorporation or Bylaws",
+    "5.07": "Submission of Matters to a Vote of Security Holders",
+    "7.01": "Regulation FD Disclosure",
+    "8.01": "Other Material Corporate Events",
+    "9.01": "Financial Statements and Exhibits",
+}
 
 
 @dataclass(frozen=True)
@@ -119,6 +142,21 @@ class EdgarClient:
         url = _BASE_URL.format(cik=cik.zfill(10))
         payload = self._get_with_retry(url)
         return list(self._parse_facts(ticker, payload))
+
+    def recent_filing_disclosures(
+        self,
+        ticker: Ticker,
+        *,
+        cik: str,
+        knowledge_date: date,
+        limit: int = 5,
+    ) -> tuple[str, ...]:
+        """Return up to ``limit`` PIT 8-K/10-Q/10-K disclosures on or before ``knowledge_date``."""
+        if limit <= 0:
+            return ()
+        url = _SUBMISSIONS_URL.format(cik=cik.zfill(10))
+        payload = self._get_with_retry(url)
+        return _parse_submissions(payload, knowledge_date=knowledge_date, limit=limit)
 
     def _get_with_retry(self, url: str) -> dict[str, object]:
         headers = {"User-Agent": self._settings.user_agent}
@@ -212,4 +250,51 @@ def _as_dict(value: object) -> dict[str, object]:
 
 
 def _parse_date(value: str) -> date:
-    return datetime.strptime(value, "%Y-%m-%d").date()
+    return date.fromisoformat(value)
+
+
+def _parse_submissions(
+    payload: dict[str, object],
+    *,
+    knowledge_date: date,
+    limit: int,
+) -> tuple[str, ...]:
+    recent = _as_dict(_as_dict(payload.get("filings")).get("recent"))
+    forms = recent.get("form")
+    filing_dates = recent.get("filingDate")
+    items_list = recent.get("items")
+    if not isinstance(forms, list) or not isinstance(filing_dates, list):
+        return ()
+    raw_items = items_list if isinstance(items_list, list) else []
+    disclosures: list[str] = []
+    for idx, (form_raw, fdate_raw) in enumerate(zip(forms, filing_dates, strict=False)):
+        if len(disclosures) >= limit:
+            break
+        if not isinstance(form_raw, str) or not isinstance(fdate_raw, str):
+            continue
+        if form_raw not in {"8-K", "10-Q", "10-K"}:
+            continue
+        try:
+            filed_on = _parse_date(fdate_raw)
+        except ValueError:
+            continue
+        if filed_on > knowledge_date:
+            continue
+        raw_item = raw_items[idx] if idx < len(raw_items) else ""
+        item_str = raw_item if isinstance(raw_item, str) else ""
+        disclosures.append(_format_filing_disclosure(form_raw, filed_on, item_str))
+    return tuple(disclosures)
+
+
+def _format_filing_disclosure(form: str, filed_on: date, items_csv: str) -> str:
+    prefix = f"[SEC EDGAR {form} filed {filed_on.isoformat()}]"
+    if form == "8-K":
+        codes = [c.strip() for c in items_csv.split(",") if c.strip() and c.strip() != "9.01"]
+        labels = [_8K_ITEM_LABELS.get(code, f"Item {code}") for code in codes]
+        if labels:
+            return f"{prefix} Current Report disclosures: {'; '.join(labels)}."
+        return f"{prefix} Current Report (Form 8-K) filed with the SEC."
+    if form == "10-Q":
+        return f"{prefix} Quarterly Report (Form 10-Q) filed with the SEC."
+    return f"{prefix} Annual Report (Form 10-K) filed with the SEC."
+

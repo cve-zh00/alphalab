@@ -21,9 +21,9 @@ when it starts to matter.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
-from alphalab.adapters.alpaca_bars import AlpacaBarsClient
+from alphalab.adapters.alpaca_bars import AlpacaBarsClient, FeedSubscriptionError
 from alphalab.domain.backtest import PriceBar
 from alphalab.domain.types import Ticker
 
@@ -60,7 +60,7 @@ class AlpacaPriceProvider:
         client: AlpacaBarsClient,
         *,
         tickers: Sequence[Ticker],
-        today: date,
+        today: date | None = None,
         history_days: int = _HISTORY_DAYS,
     ) -> None:
         self._client = client
@@ -79,7 +79,17 @@ class AlpacaPriceProvider:
         rather than being swallowed, because a partially loaded panel would
         silently change which names the strategy can even see.
         """
-        end = self._today - timedelta(days=_END_LAG_DAYS)
+        today = self._today or datetime.now(UTC).date()
+        end = today - timedelta(days=_END_LAG_DAYS)
+        try:
+            return self._fetch_for_end(end)
+        except FeedSubscriptionError:
+            # When UTC has rolled past midnight while US Eastern has not,
+            # ``today - 1 day`` in UTC is still today's US session and SIP
+            # rejects the query as "recent SIP data". Step back one day.
+            return self._fetch_for_end(end - timedelta(days=1))
+
+    def _fetch_for_end(self, end: date) -> dict[Ticker, Sequence[PriceBar]]:
         start = end - timedelta(days=self._history_days)
         out: dict[Ticker, Sequence[PriceBar]] = {}
         for batch in self._batches():

@@ -34,29 +34,35 @@ from alphalab.domain.debate.ports import BearRequest, BullRequest, JudgeRequest
 
 _BULL_SYSTEM = (
     "You are the BULL analyst in a structured investment debate. Argue the "
-    "bullish case for the given ticker from the shared evidence, rebutting the "
-    "bear's prior points when present. State your thesis and catalysts in prose, "
-    "cite verbatim evidence, and give a bounded confidence in [0,1]. The "
-    "valuation numbers were computed by trusted code and are context only. Never "
-    "invent, estimate, or state any price target, valuation, ratio, or figure."
+    "bullish case for the given ticker (when shown as 'COMPANY_X', treat it as "
+    "an intentionally anonymized equity identifier) from the shared evidence, "
+    "rebutting the bear's prior points when present. State your thesis and "
+    "catalysts in prose, cite verbatim evidence, and give a bounded confidence "
+    "in [0,1]. The valuation numbers were computed by trusted code and are "
+    "context only. Never invent, estimate, or state any price target, valuation, "
+    "ratio, or figure. /no_think"
 )
 
 _BEAR_SYSTEM = (
     "You are the BEAR analyst in a structured investment debate. Argue the "
-    "bearish case for the given ticker from the shared evidence, rebutting the "
-    "bull's prior points when present. State your thesis and risks in prose, "
-    "cite verbatim evidence, and give a bounded confidence in [0,1]. The "
-    "valuation numbers were computed by trusted code and are context only. Never "
-    "invent, estimate, or state any price target, valuation, ratio, or figure."
+    "bearish case for the given ticker (when shown as 'COMPANY_X', treat it as "
+    "an intentionally anonymized equity identifier) from the shared evidence, "
+    "rebutting the bull's prior points when present. State your thesis and "
+    "risks in prose, cite verbatim evidence, and give a bounded confidence in "
+    "[0,1]. The valuation numbers were computed by trusted code and are context "
+    "only. Never invent, estimate, or state any price target, valuation, ratio, "
+    "or figure. /no_think"
 )
 
 _JUDGE_SYSTEM = (
     "You are the impartial JUDGE resolving an investment debate. Read the full "
-    "ordered transcript of bull and bear turns and issue a directional verdict "
-    "(BUY/HOLD/SELL). Explain your reasoning in prose and name which bull points "
-    "and which bear points weighed in your decision. The valuation numbers were "
-    "computed by trusted code and are context only. Never invent, alter, or "
-    "restate any price target or numeric valuation."
+    "ordered transcript of bull and bear turns for the given ticker (when shown "
+    "as 'COMPANY_X', treat it as an intentionally anonymized equity identifier) "
+    "and issue a directional verdict (BUY/HOLD/SELL). Explain your reasoning in "
+    "prose and name which bull points and which bear points weighed in your "
+    "decision. The valuation numbers were computed by trusted code and are "
+    "context only. Never invent, alter, or restate any price target or numeric "
+    "valuation. /no_think"
 )
 
 
@@ -73,7 +79,12 @@ class OllamaDebateAdapter:
 
     def __init__(self, settings: LLMSettings | None = None) -> None:
         self._settings = settings or LLMSettings()
-        model_settings = ModelSettings(timeout=self._settings.timeout_seconds)
+        model_settings = ModelSettings(
+            timeout=self._settings.timeout_seconds,
+            temperature=self._settings.temperature,
+            seed=self._settings.seed,
+            extra_body={"reasoning_effort": "none"},
+        )
         self._bull_agent: Agent[None, BullCase] = Agent(
             self._build_model(self._settings.quick_model),
             output_type=ToolOutput(BullCase),
@@ -108,52 +119,61 @@ class OllamaDebateAdapter:
 
     def argue_bull(self, request: BullRequest) -> BullCase:
         """Bull case via the quick-think agent (``BullProvider.argue``)."""
-        return self._bull_agent.run_sync(_bull_prompt(request)).output
+        return self._bull_agent.run_sync(
+            _bull_prompt(request, anonymize=self._settings.anonymize_ticker)
+        ).output
 
     def argue_bear(self, request: BearRequest) -> BearCase:
         """Bear case via the quick-think agent (``BearProvider.argue``)."""
-        return self._bear_agent.run_sync(_bear_prompt(request)).output
+        return self._bear_agent.run_sync(
+            _bear_prompt(request, anonymize=self._settings.anonymize_ticker)
+        ).output
 
     def rule(self, request: JudgeRequest) -> JudgeRuling:
         """Arbiter ruling via the deep-think agent (``JudgeProvider.rule``)."""
-        return self._judge_agent.run_sync(_judge_prompt(request)).output
+        return self._judge_agent.run_sync(
+            _judge_prompt(request, anonymize=self._settings.anonymize_ticker)
+        ).output
 
 
 def _numbers_block(valuation_summary: tuple[tuple[str, float], ...]) -> str:
     return "\n".join(f"- {name}: {value}" for name, value in valuation_summary)
 
 
-def _bull_prompt(request: BullRequest) -> str:
+def _bull_prompt(request: BullRequest, *, anonymize: bool = False) -> str:
+    label = "COMPANY_X" if anonymize else request.ticker
     evidence = "\n".join(f"- {e}" for e in request.evidence)
     rebuttal = "\n".join(f"- {a}" for a in request.opponent_arguments)
     return (
-        f"Ticker: {request.ticker}\n\n"
+        f"Ticker: {label}\n\n"
         f"Computed valuation context (do not alter):\n"
         f"{_numbers_block(request.valuation_summary)}\n\n"
         f"Shared evidence:\n{evidence}\n\n"
-        f"Bear's prior public arguments to rebut:\n{rebuttal or '- (none yet)'}"
+        f"Bear's prior public arguments to rebut:\n{rebuttal or '- (none yet)'}\n/no_think"
     )
 
 
-def _bear_prompt(request: BearRequest) -> str:
+def _bear_prompt(request: BearRequest, *, anonymize: bool = False) -> str:
+    label = "COMPANY_X" if anonymize else request.ticker
     evidence = "\n".join(f"- {e}" for e in request.evidence)
     rebuttal = "\n".join(f"- {a}" for a in request.opponent_arguments)
     return (
-        f"Ticker: {request.ticker}\n\n"
+        f"Ticker: {label}\n\n"
         f"Computed valuation context (do not alter):\n"
         f"{_numbers_block(request.valuation_summary)}\n\n"
         f"Shared evidence:\n{evidence}\n\n"
-        f"Bull's prior public arguments to rebut:\n{rebuttal or '- (none yet)'}"
+        f"Bull's prior public arguments to rebut:\n{rebuttal or '- (none yet)'}\n/no_think"
     )
 
 
-def _judge_prompt(request: JudgeRequest) -> str:
+def _judge_prompt(request: JudgeRequest, *, anonymize: bool = False) -> str:
+    label = "COMPANY_X" if anonymize else request.ticker
     transcript = "\n".join(f"{t.turn_number}. [{t.role.value}] {t.argument}" for t in request.turns)
     return (
-        f"Ticker: {request.ticker}\n\n"
+        f"Ticker: {label}\n\n"
         f"Computed valuation context (do not alter):\n"
         f"{_numbers_block(request.valuation_summary)}\n\n"
-        f"Debate transcript (in order):\n{transcript}"
+        f"Debate transcript (in order):\n{transcript}\n/no_think"
     )
 
 

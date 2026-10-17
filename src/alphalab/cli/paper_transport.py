@@ -18,8 +18,13 @@ __all__ = ["HttpxWriteTransport"]
 class HttpxWriteTransport:
     """A ``WriteTransport`` backed by a single httpx client."""
 
-    def __init__(self, *, timeout: float = 30.0) -> None:
-        self._client = httpx.Client(timeout=timeout, follow_redirects=True)
+    def __init__(self, *, timeout: float = 30.0, retries: int = 3) -> None:
+        transport = httpx.HTTPTransport(retries=retries)
+        self._client = httpx.Client(
+            timeout=timeout,
+            follow_redirects=True,
+            transport=transport,
+        )
 
     def get(self, url: str, *, headers: dict[str, str]) -> HttpResponse:
         response = self._client.get(url, headers=headers)

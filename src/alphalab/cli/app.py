@@ -21,7 +21,9 @@ from datetime import date
 from pathlib import Path
 from typing import TextIO
 
+from alphalab.cli.autopilot_parser import build_autopilot_parser, dispatch_autopilot
 from alphalab.cli.commands import (
+    AutopilotCycleOptions,
     CalibrationOptions,
     DoctorOptions,
     JournalOptions,
@@ -31,6 +33,8 @@ from alphalab.cli.commands import (
     ResearchOptions,
     ScheduleOptions,
     SettleOptions,
+    run_autopilot_run,
+    run_autopilot_status,
     run_calibration,
     run_doctor,
     run_journal,
@@ -57,6 +61,25 @@ _DEFAULT_PRICES_DIR = default_prices_dir()
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[3]
+
+
+def _maybe_load_dotenv() -> None:
+    """Load unset variables from ``.env`` at repo root when not running under pytest."""
+    os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return
+    env_path = _project_root() / ".env"
+    if not env_path.is_file():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        clean_key = key.strip()
+        clean_val = value.strip().strip('"').strip("'")
+        if clean_key:
+            os.environ.setdefault(clean_key, clean_val)
 
 
 def _no_color_default() -> bool:
@@ -90,6 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
     _build_schedule_parser(sub)
     _build_doctor_parser(sub)
     _build_paper_parser(sub)
+    build_autopilot_parser(sub)
     _build_run_cadence_parser(sub)
     return parser
 
@@ -312,6 +336,15 @@ def _add_paper_common(parser: argparse.ArgumentParser, *, with_prices: bool) -> 
             default=None,
             help="Kill-switch halt file path (default: ./HALT at the repo root).",
         )
+        parser.add_argument(
+            "--strategy",
+            choices=("rank_ensemble", "agentic"),
+            default="rank_ensemble",
+            help=(
+                "Strategy engine: 'rank_ensemble' (momentum baseline) or "
+                "'agentic' (NOFX autopilot)."
+            ),
+        )
     _add_common_output_flags(parser)
 
 
@@ -374,6 +407,25 @@ def _parse_date(raw: str) -> date:
 def _dispatch_paper(args: argparse.Namespace, *, out: TextIO, err: TextIO, no_color: bool) -> int:
     """Route a ``paper`` invocation to its subcommand runner."""
     command = getattr(args, "paper_command", None)
+    strategy = getattr(args, "strategy", "rank_ensemble")
+    if command in ("status", "run") and strategy == "agentic":
+        opts = AutopilotCycleOptions(
+            execution_db=args.execution_db,
+            journal_db=_DEFAULT_DB,
+            abstentions_db=default_abstention_db(),
+            prices_dir=args.prices_dir,
+            halt_path=args.halt_file,
+            as_of=None,
+            source="live",
+            use_llm=True,
+            debate=False,
+            submit=bool(getattr(args, "submit", False)) if command == "run" else False,
+            as_json=args.json,
+            no_color=no_color,
+        )
+        if command == "status":
+            return run_autopilot_status(opts, out=out, err=err)
+        return run_autopilot_run(opts, out=out, err=err)
     if command == "status":
         return run_paper_status(
             PaperStatusOptions(
@@ -434,6 +486,7 @@ def main(
     """
     out = out or sys.stdout
     err = err or sys.stderr
+    _maybe_load_dotenv()
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -506,6 +559,8 @@ def main(
         )
     if args.command == "paper":
         return _dispatch_paper(args, out=out, err=err, no_color=no_color)
+    if args.command == "autopilot":
+        return dispatch_autopilot(args, out=out, err=err, no_color=no_color)
     if args.command == "_run-cadence":
         from alphalab.cli.commands.run_cadence import run_cadence
 

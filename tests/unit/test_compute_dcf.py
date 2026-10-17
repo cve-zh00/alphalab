@@ -166,3 +166,57 @@ class TestDcfValuePerShare:
                 terminal_growth=0.03,
                 shares_outstanding=0.0,
             )
+
+    def test_fcff_net_debt_bridge_and_capm_and_reverse_dcf(self) -> None:
+        from alphalab.domain.compute.operators.dcf import (
+            cost_of_equity_capm,
+            reverse_dcf_implied_growth,
+        )
+        from alphalab.domain.compute.sectors import (
+            GicsSector,
+            compute_capm_cost_of_equity,
+            estimate_beta_from_prices,
+            resolve_sector_profile,
+        )
+        from alphalab.domain.types import Ticker
+
+        ke = cost_of_equity_capm(risk_free_rate=0.042, beta=1.2, equity_risk_premium=0.05)
+        assert ke.value == pytest.approx(0.102)
+
+        fcfe_node = dcf_value_per_share(
+            cash_flows=[100.0, 105.0, 110.0],
+            discount_rate=ke,
+            terminal_growth=0.025,
+            shares_outstanding=10.0,
+        )
+        fcff_node = dcf_value_per_share(
+            cash_flows=[100.0, 105.0, 110.0],
+            discount_rate=ke,
+            terminal_growth=0.025,
+            shares_outstanding=10.0,
+            net_debt=50.0,
+        )
+        assert fcff_node.value == pytest.approx(fcfe_node.value - 5.0)
+
+        g_star = reverse_dcf_implied_growth(
+            base_cash_flow=100.0,
+            discount_rate=0.10,
+            terminal_growth=0.025,
+            current_price=fcfe_node.value,
+            shares_outstanding=10.0,
+            projection_years=3,
+        )
+        assert g_star is not None
+        assert -0.25 <= g_star <= 0.40
+
+        prof = resolve_sector_profile(Ticker("NVDA"))
+        assert prof.sector is GicsSector.INFORMATION_TECHNOLOGY
+        assert prof.peer_pe == (22.0, 25.0, 28.0)
+
+        prices = [100.0 + i * 0.5 for i in range(70)]
+        bench = [400.0 + i * 1.5 for i in range(70)]
+        beta = estimate_beta_from_prices(prices, bench, default_beta=1.1)
+        assert 0.40 <= beta <= 2.20
+        capm_ke = compute_capm_cost_of_equity(beta=beta)
+        assert 0.065 <= capm_ke <= 0.145
+

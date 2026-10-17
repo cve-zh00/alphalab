@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Protocol
 
@@ -44,6 +44,7 @@ from alphalab.domain.types import Side, Ticker
 __all__ = [
     "AccountSnapshot",
     "AlpacaBroker",
+    "BrokerOrder",
     "BrokerPosition",
     "MarketClock",
     "OrderOutcome",
@@ -93,6 +94,18 @@ class BrokerPosition:
     ticker: Ticker
     shares: float
     price: float
+    avg_entry_price: float | None = None
+
+
+@dataclass(frozen=True)
+class BrokerOrder:
+    """One working (open/unfilled) order as reported by Alpaca."""
+
+    ticker: Ticker
+    side: Side
+    shares: float
+    client_order_id: str
+    broker_order_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -100,6 +113,9 @@ class MarketClock:
     """Whether the market is open right now, per Alpaca's clock endpoint."""
 
     is_open: bool
+    timestamp: datetime | None = None
+    next_open: datetime | None = None
+    next_close: datetime | None = None
 
 
 class OrderStatus(StrEnum):
@@ -169,17 +185,53 @@ class AlpacaBroker:
             if not isinstance(symbol, str):
                 continue
             ticker = Ticker(symbol)
+            avg_entry = _as_float(row.get("avg_entry_price"))
             out[ticker] = BrokerPosition(
                 ticker=ticker,
                 shares=_as_float(row.get("qty")),
                 price=_as_float(row.get("current_price")),
+                avg_entry_price=avg_entry if avg_entry > 0.0 else None,
             )
         return out
 
     def clock(self) -> MarketClock:
         """Fetch the market clock (whether the market is currently open)."""
         payload = self._get("/v2/clock")
-        return MarketClock(is_open=bool(payload.get("is_open")))
+        return MarketClock(
+            is_open=bool(payload.get("is_open")),
+            timestamp=_as_datetime(payload.get("timestamp")),
+            next_open=_as_datetime(payload.get("next_open")),
+            next_close=_as_datetime(payload.get("next_close")),
+        )
+
+    def open_orders(self) -> tuple[BrokerOrder, ...]:
+        """Fetch working orders from ``/v2/orders?status=open``."""
+        rows = self._get_list("/v2/orders?status=open")
+        out: list[BrokerOrder] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            symbol = row.get("symbol")
+            side_raw = str(row.get("side", "")).lower()
+            if not isinstance(symbol, str) or side_raw not in ("buy", "sell"):
+                continue
+            qty = _as_float(row.get("qty"))
+            filled = _as_float(row.get("filled_qty"))
+            remaining = max(0.0, qty - filled) if qty > 0.0 else 0.0
+            if remaining <= 0.0:
+                continue
+            coid = row.get("client_order_id")
+            boid = row.get("id")
+            out.append(
+                BrokerOrder(
+                    ticker=Ticker(symbol),
+                    side=Side.BUY if side_raw == "buy" else Side.SELL,
+                    shares=remaining,
+                    client_order_id=coid if isinstance(coid, str) else "",
+                    broker_order_id=boid if isinstance(boid, str) else None,
+                )
+            )
+        return tuple(out)
 
     def open_order_ids(self) -> frozenset[str]:
         """Return the set of ``client_order_id`` values already at the broker.
@@ -262,7 +314,7 @@ def _format_qty(shares: float) -> str:
     """Render a share count without a trailing ``.0`` when it is whole."""
     if shares == int(shares):
         return str(int(shares))
-    return repr(shares)
+    return f"{round(shares, 4):.4f}".rstrip("0").rstrip(".")
 
 
 def _classify(intent: OrderIntent, coid: str, response: HttpResponse) -> OrderOutcome:
@@ -319,3 +371,13 @@ def _as_float(value: object) -> float:
         except ValueError:
             return 0.0
     return 0.0
+
+
+def _as_datetime(value: object) -> datetime | None:
+    """Parse an ISO-8601 timestamp from Alpaca; return None if absent/invalid."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None

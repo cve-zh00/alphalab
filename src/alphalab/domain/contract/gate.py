@@ -212,3 +212,42 @@ def _range_from_methods(artifact: EquityResearchArtifact) -> PriceRange | None:
     high = max(values)
     mid = sorted(values)[len(values) // 2]
     return PriceRange(low=low, mid=mid, high=high)
+
+
+C1B_STAMP = "[CONTRACT/contract_c1b_corroboration]"
+C1B_TARGET_DETAIL = "conservative C1b target"
+
+
+def conservative_c1b_target(artifact: EquityResearchArtifact) -> float | None:
+    """Conservative point value derived from a C1b-degraded range, else ``None``.
+
+    Applies only when the gate degraded the point because of method dispersion
+    (C1b stamp present, point absent) and every method agrees directionally
+    against the current price: bullish (``low > price``) gives
+    ``0.5 * (low + mid)``; bearish (``high < price``) gives ``0.5 * (mid + high)``.
+    A range straddling the price (methods contradict) yields ``None``. Hard
+    withholds drop the range, so they never produce a value here.
+    """
+    rng = artifact.price_range
+    price = artifact.current_price
+    if (
+        rng is None
+        or artifact.price_target is not None
+        or C1B_STAMP not in artifact.contract_stamps
+        or not (math.isfinite(price) and price > 0.0)
+        or not all(math.isfinite(v) for v in (rng.low, rng.mid, rng.high))
+    ):
+        return None
+    if rng.low > price:
+        return 0.5 * (rng.low + rng.mid)
+    if rng.high < price:
+        return 0.5 * (rng.mid + rng.high)
+    return None
+
+
+def conservative_c1b_upside(artifact: EquityResearchArtifact) -> float | None:
+    """Implied fractional upside of :func:`conservative_c1b_target`, if any."""
+    value = conservative_c1b_target(artifact)
+    if value is None:
+        return None
+    return value / artifact.current_price - 1.0

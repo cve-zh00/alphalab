@@ -55,3 +55,6 @@ class LLMSettings(BaseSettings):
     deep_version: str = "qwen3.8-27b-mlx"
     timeout_seconds: float = Field(default=120.0, gt=0.0)
     max_retries: int = Field(default=2, ge=0)
+    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    seed: int = 42
+    anonymize_ticker: bool = True

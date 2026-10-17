@@ -86,7 +86,10 @@ class TestConceptMapping:
     def test_prefers_higher_priority_concept_when_both_present(self) -> None:
         # Arrange — both revenue concepts present; ``Revenues`` wins.
         payload = _facts(
-            _usd("Revenues", [{"start": "2023-01-01", "end": "2023-12-31", "val": 900.0, "filed": "2024-02-01"}]),
+            _usd(
+                "Revenues",
+                [{"start": "2023-01-01", "end": "2023-12-31", "val": 900.0, "filed": "2024-02-01"}],
+            ),
             _usd(
                 "RevenueFromContractWithCustomerExcludingAssessedTax",
                 [{"start": "2023-01-01", "end": "2023-12-31", "val": 500.0, "filed": "2024-02-01"}],
@@ -108,8 +111,18 @@ class TestAsFiledPreservation:
             _usd(
                 "NetIncomeLoss",
                 [
-                    {"start": "2023-01-01", "end": "2023-12-31", "val": 100.0, "filed": "2024-02-01"},
-                    {"start": "2023-01-01", "end": "2023-12-31", "val": 80.0, "filed": "2024-08-01"},
+                    {
+                        "start": "2023-01-01",
+                        "end": "2023-12-31",
+                        "val": 100.0,
+                        "filed": "2024-02-01",
+                    },
+                    {
+                        "start": "2023-01-01",
+                        "end": "2023-12-31",
+                        "val": 80.0,
+                        "filed": "2024-08-01",
+                    },
                 ],
             )
         )

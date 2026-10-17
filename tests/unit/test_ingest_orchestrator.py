@@ -398,3 +398,37 @@ class TestInsufficientData:
         assert result.request is None
         assert result.methods_used == ()
         assert result.omitted_methods  # explains why there is no number
+
+    def test_ddm_skipped_when_payout_ratio_below_threshold(self, tmp_path) -> None:
+        facts = _full_facts(with_dividends=True)
+        transport = _MapTransport(_CIK_MAP, facts)
+        clock = _FakeClock()
+        cik_resolver = CikResolver(
+            CikSettings(user_agent="t t@e.com"),
+            transport=transport,
+            cache_path=tmp_path / "cik.json",
+            clock=clock,
+        )
+        edgar_client = EdgarClient(
+            EdgarSettings(user_agent="t t@e.com"), transport=transport, clock=clock
+        )
+        # DPS=2.0, EPS=5.0 -> payout=40%; requiring 50% gates out DDM
+        high_gate = _assumptions().model_copy(update={"min_payout_ratio": 0.50})
+        result = build_request(
+            Ticker("ACME"),
+            knowledge_date=date(2023, 6, 30),
+            assumptions=high_gate,
+            cik_resolver=cik_resolver,
+            edgar_client=edgar_client,
+            price_source=_StubPriceSource([PricePoint(on=date(2023, 6, 29), close=50.0)]),
+            pit_store_root=tmp_path / "store",
+            run_metadata=_run_metadata(),
+        )
+        assert "ddm" not in result.methods_used
+        assert any("payout ratio" in r for r in result.omitted_methods)
+        assert result.request is not None
+        # Verify PIT dossier qualitative text contains no digits (Contract Gate C2 safe)
+        for text in result.request.documents:
+            body = text.split("] ", 1)[-1]
+            assert not any(ch.isdigit() for ch in body)
+

@@ -41,19 +41,26 @@ from alphalab.domain.analyst.contracts import (
 from alphalab.domain.analyst.tiers import ModelTier
 
 _EXTRACTION_SYSTEM = (
-    "You are a financial analyst assistant. Extract discrete qualitative facts "
-    "from the provided source text about the given ticker. Classify each fact by "
-    "category and direction, quote the exact supporting text, and name its source. "
-    "Report ONLY qualitative facts. Never estimate, infer, or state any price "
-    "target, valuation, ratio, or numeric financial figure."
+    "You are a financial analyst assistant. Call the final_result tool "
+    "immediately with NO prose outside the tool call. Extract up to 3 concise "
+    "qualitative facts (both positive and negative) from the source text for "
+    "the ticker (when shown as 'COMPANY_X', treat it as an intentionally "
+    "anonymized equity identifier for blind evaluation). Quote a short verbatim "
+    "phrase for evidence_quote (<15 words) and name its source. Report ONLY "
+    "qualitative facts without numbers."
 )
 
 _NARRATION_SYSTEM = (
-    "You are a senior equity research arbiter. Synthesise a thesis, risks, and "
-    "catalysts in prose from the supplied qualitative findings, and issue a "
-    "directional verdict (BUY/HOLD/SELL). The valuation numbers were already "
-    "computed by trusted code and are given to you as context; narrate around "
-    "them. Do NOT invent, alter, or restate any price target or numeric valuation."
+    "You are a senior equity research arbiter. Call the final_result tool "
+    "immediately with NO prose outside the tool call. From the supplied "
+    "findings and pre-computed valuation context for the ticker (when shown as "
+    "'COMPANY_X', treat it as an intentionally anonymized equity identifier for "
+    "blind evaluation), state thesis, risks, and catalysts in 1 short sentence "
+    "each (<15 words) and issue a directional verdict (BUY/HOLD/SELL). Weigh "
+    "both valuation and fundamental quality: if findings report negative free "
+    "cash flow, compressed margins, or elevated net leverage, issue HOLD or "
+    "SELL even when consensus_mid exceeds current_price. Do NOT invent, alter, "
+    "or restate any price target or numeric valuation."
 )
 
 
@@ -70,7 +77,12 @@ class OllamaLLMAdapter:
 
     def __init__(self, settings: LLMSettings | None = None) -> None:
         self._settings = settings or LLMSettings()
-        model_settings = ModelSettings(timeout=self._settings.timeout_seconds)
+        model_settings = ModelSettings(
+            timeout=self._settings.timeout_seconds,
+            temperature=self._settings.temperature,
+            seed=self._settings.seed,
+            extra_body={"reasoning_effort": "none"},
+        )
         self._quick_agent: Agent[None, tuple[QualitativeFinding, ...]] = Agent(
             self._build_model(self._settings.quick_model),
             output_type=ToolOutput(tuple[QualitativeFinding, ...]),
@@ -98,13 +110,17 @@ class OllamaLLMAdapter:
 
     def extract(self, request: ExtractionRequest) -> tuple[QualitativeFinding, ...]:
         """Extract qualitative findings via the quick-think agent."""
-        prompt = self._extraction_prompt(request)
+        prompt = self._extraction_prompt(
+            request, anonymize=self._settings.anonymize_ticker
+        )
         result = self._quick_agent.run_sync(prompt)
         return tuple(result.output)
 
     def narrate(self, request: NarrationRequest) -> ThesisNarrative:
         """Synthesise the thesis narrative via the deep-think agent."""
-        prompt = self._narration_prompt(request)
+        prompt = self._narration_prompt(
+            request, anonymize=self._settings.anonymize_ticker
+        )
         result = self._deep_agent.run_sync(prompt)
         return result.output
 
@@ -144,19 +160,21 @@ class OllamaLLMAdapter:
         )
 
     @staticmethod
-    def _extraction_prompt(request: ExtractionRequest) -> str:
+    def _extraction_prompt(request: ExtractionRequest, *, anonymize: bool = False) -> str:
+        label = "COMPANY_X" if anonymize else request.ticker
         joined = "\n\n---\n\n".join(request.documents)
-        return f"Ticker: {request.ticker}\n\nSource documents:\n{joined}"
+        return f"Ticker: {label}\n\nSource documents:\n{joined}"
 
     @staticmethod
-    def _narration_prompt(request: NarrationRequest) -> str:
+    def _narration_prompt(request: NarrationRequest, *, anonymize: bool = False) -> str:
+        label = "COMPANY_X" if anonymize else request.ticker
         facts = "\n".join(
             f"- [{f.category}/{f.direction.value}] {f.evidence_quote} ({f.source})"
             for f in request.findings
         )
         numbers = "\n".join(f"- {name}: {value}" for name, value in request.valuation_summary)
         return (
-            f"Ticker: {request.ticker}\n\n"
+            f"Ticker: {label}\n\n"
             f"Computed valuation context (do not alter):\n{numbers}\n\n"
             f"Qualitative findings:\n{facts}"
         )

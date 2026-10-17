@@ -12,6 +12,15 @@ one that must be tightened after an incident is not.
 from __future__ import annotations
 
 from alphalab.domain.execution.cadence import is_rebalance_due, quarter_of
+from alphalab.domain.execution.nofx_guards import (
+    AutopilotGuardConfig,
+    GuardAction,
+    GuardActionKind,
+    GuardedTargets,
+    PositionRiskSnapshot,
+    apply_nofx_guards,
+    should_drawdown_close,
+)
 from alphalab.domain.execution.planner import plan_trades
 from alphalab.domain.execution.types import (
     Holding,
@@ -22,12 +31,19 @@ from alphalab.domain.execution.types import (
 )
 
 __all__ = [
+    "AutopilotGuardConfig",
+    "GuardAction",
+    "GuardActionKind",
+    "GuardedTargets",
     "Holding",
     "OrderIntent",
+    "PositionRiskSnapshot",
     "RejectedOrder",
     "RiskLimits",
     "TradePlan",
+    "apply_nofx_guards",
     "is_rebalance_due",
     "plan_trades",
     "quarter_of",
+    "should_drawdown_close",
 ]

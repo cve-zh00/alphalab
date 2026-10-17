@@ -31,9 +31,11 @@ Two properties are preserved deliberately:
 
 from __future__ import annotations
 
+import itertools
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import timedelta
 from enum import StrEnum
 
 from alphalab.adapters.edgar import EdgarClient
@@ -141,6 +143,57 @@ _ANNUAL_MIN_DAYS = 300
 _ANNUAL_MAX_DAYS = 400
 
 
+_QUARTER_MIN_DAYS = 75
+_QUARTER_MAX_DAYS = 105
+_TTM_DAYS = 365
+
+
+def _is_quarter(record: PITRecord) -> bool:
+    """Whether ``record`` covers a single fiscal quarter (~3 months)."""
+    days = record.period_days
+    return days is not None and _QUARTER_MIN_DAYS <= days <= _QUARTER_MAX_DAYS
+
+
+def synthesize_ttm(records: list[PITRecord]) -> PITRecord | None:
+    """Trailing-twelve-month record from four true, consecutive quarterly facts.
+
+    Only fires when the latest four distinct quarters chain without gaps or
+    overlap *and* all end after the latest annual period end (otherwise the
+    annual figure already covers them). ``observed_at`` is the latest filing
+    date among the quarters used, so the TTM is never knowable earlier than its
+    newest input. Returns ``None`` otherwise; a flow is never backfilled from
+    fewer than four quarters.
+    """
+    annual_ends = [r.as_of for r in records if _is_annual(r)]
+    if not annual_ends:
+        return None
+    latest_annual = max(annual_ends)
+    by_end: dict = {}
+    for rec in records:
+        if not _is_quarter(rec):
+            continue
+        prev = by_end.get(rec.as_of)
+        if prev is None or rec.observed_at >= prev.observed_at:
+            by_end[rec.as_of] = rec
+    quarters = [by_end[d] for d in sorted(by_end)][-4:]
+    if len(quarters) < 4 or quarters[0].as_of <= latest_annual:
+        return None
+    for prev, nxt in itertools.pairwise(quarters):
+        gap = (nxt.as_of - prev.as_of).days
+        if not _QUARTER_MIN_DAYS <= gap <= _QUARTER_MAX_DAYS:
+            return None
+        if nxt.period_start is not None and nxt.period_start < prev.as_of:
+            return None
+    last = quarters[-1]
+    return last.model_copy(
+        update={
+            "value": sum(q.value for q in quarters),
+            "observed_at": max(q.observed_at for q in quarters),
+            "period_start": last.as_of - timedelta(days=_TTM_DAYS),
+        }
+    )
+
+
 def _is_annual(record: PITRecord) -> bool:
     """Whether ``record`` covers a full year (instants are never annual flows)."""
     days = record.period_days
@@ -184,6 +237,10 @@ def extract_fundamentals(client: EdgarClient, ticker: Ticker, *, cik: str) -> Fu
             continue
         resolved[field] = chosen
         records.extend(_relabel(rec, field) for rec in by_concept[chosen] if keep(rec))
+        if field in FLOW_FIELDS:
+            ttm = synthesize_ttm(by_concept[chosen])
+            if ttm is not None:
+                records.append(_relabel(ttm, field))
 
     return FundamentalRecords(
         records=tuple(records),

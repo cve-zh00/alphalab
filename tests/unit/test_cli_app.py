@@ -94,9 +94,20 @@ class TestResearchNoLlm:
 
 
 class TestResearchLlmErrorPath:
-    def test_live_source_without_wiring_is_handled(self) -> None:
-        """--source live is not provisioned yet: actionable error, no stack trace."""
+    def test_live_source_without_user_agent_is_actionable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--source live is now provisioned; absent SEC User-Agent is a config error.
+
+        The live EDGAR path is wired (see :mod:`alphalab.cli.ingest`). When the
+        mandatory ``ALPHALAB_EDGAR_USER_AGENT`` is not set, the user must get an
+        actionable, stack-trace-free message that names the variable and points
+        at ``--source fixture`` — and, per the CLI's error policy, exit code 2
+        (a user-fixable environment mistake), not 1.
+        """
+        monkeypatch.delenv("ALPHALAB_EDGAR_USER_AGENT", raising=False)
         code, _out, err = _run(["research", "AAPL", "--source", "live", "--no-llm"])
-        assert code == 1
+        assert code == 2
+        assert "ALPHALAB_EDGAR_USER_AGENT" in err
         assert "fixture" in err.lower()
         assert "Traceback" not in err

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from alphalab.artifact.models import (
     EquityResearchArtifact,
     PriceRange,
@@ -190,3 +192,50 @@ class TestDemo:
         assert out.verdict is Verdict.BUY
         assert "demand stays resilient" in out.narrative_slots["analysis"]
         assert "turnaround executes" in out.narrative_slots["analysis"]
+
+
+class TestC1bConservativeTarget:
+    def _dispersed(self, **kw: object) -> EquityResearchArtifact:
+        return _good_artifact(
+            consensus_relative_span=5.0,
+            narrative_slots={},
+            price_range=PriceRange(
+                low=kw.pop("low", 120.0), mid=kw.pop("mid", 150.0), high=kw.pop("high", 200.0)
+            ),  # type: ignore[arg-type]
+            **kw,
+        )
+
+    def test_bullish_range_yields_conservative_target(self) -> None:
+        from alphalab.domain.contract.gate import conservative_c1b_target, conservative_c1b_upside
+
+        out = enforce_contract(self._dispersed()).artifact
+        assert out.price_target is None
+        assert out.price_range is not None
+        assert "[CONTRACT/contract_c1b_corroboration]" in out.contract_stamps
+        assert conservative_c1b_target(out) == 135.0
+        assert conservative_c1b_upside(out) == pytest.approx(0.35)
+
+    def test_bearish_range(self) -> None:
+        from alphalab.domain.contract.gate import conservative_c1b_target
+
+        out = enforce_contract(self._dispersed(low=20.0, mid=40.0, high=60.0)).artifact
+        assert conservative_c1b_target(out) == 50.0
+
+    def test_straddling_range_has_no_target(self) -> None:
+        from alphalab.domain.contract.gate import conservative_c1b_target
+
+        out = enforce_contract(self._dispersed(low=50.0, high=200.0)).artifact
+        assert conservative_c1b_target(out) is None
+
+    def test_idempotent(self) -> None:
+        once = enforce_contract(self._dispersed()).artifact
+        twice = enforce_contract(once).artifact
+        assert twice == once
+
+    def test_hard_withhold_gives_no_target(self) -> None:
+        from alphalab.domain.contract.gate import conservative_c1b_target
+
+        art = self._dispersed(price_target=PriceTarget(value=1000.0, unit="USD_per_share"))
+        out = enforce_contract(art).artifact
+        assert out.price_range is None
+        assert conservative_c1b_target(out) is None

@@ -28,7 +28,11 @@ from alphalab.cli.deterministic import (
     TemplateNarrationProvider,
 )
 from alphalab.cli.fixtures import FixtureNotFoundError, build_fixture_request
-from alphalab.cli.ingest import LiveIngestUnavailableError, load_live_builder
+from alphalab.cli.ingest import (
+    LiveIngestConfigError,
+    LiveIngestUnavailableError,
+    load_live_builder,
+)
 from alphalab.domain.analyst.contracts import RunMetadata
 from alphalab.report import format_artifact, theme_for
 
@@ -52,6 +56,12 @@ def run_research(opts: ResearchOptions, *, out: TextIO, err: TextIO) -> int:
     try:
         artifact, request, source_label = build_research(opts)
     except FixtureNotFoundError as exc:
+        print(f"error: {exc}", file=err)
+        return 2
+    except LiveIngestConfigError as exc:
+        # Missing/invalid live configuration (e.g. no SEC User-Agent) is a
+        # user-fixable environment mistake, not an unavailable code path:
+        # exit 2 (like a bad argument), actionable message, no stack trace.
         print(f"error: {exc}", file=err)
         return 2
     except LiveIngestUnavailableError as exc:

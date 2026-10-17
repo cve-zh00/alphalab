@@ -1,0 +1,17 @@
+{
+  "skill_name": "quant-financial-auditor",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Audita el proyecto completo como experto en análisis financiero cuantitativo y sistemas agénticos. Analiza cada parte del proyecto (valuación DCF/DDM/PE, selección del S&P 500, agentes LLM/debate, calibración, dimensionamiento de portafolio y guardias de ejecución NOFX) y propón mejoras concretas basadas en estudios académicos y proyectos open-source.",
+      "expected_output": "Structured 7-pillar institutional audit report citing verified arXiv studies and open-source architectures, identifying concrete code-level bottlenecks (e.g., DDM distortion on low-payout tech stocks, liquidity-only pre-screen bias on spy500, fixed 5% slot cash drag & whole-share truncation on high-priced stocks, pre-open pending order blindness across date rollovers, open-loop journal lessons) with mathematical specifications and a prioritized roadmap.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Revisa los modelos de valuación en src/alphalab/domain/compute/operators/ y por qué tantas acciones del S&P 500 son retenidas por el ContractGate (valuation_withheld). ¿Qué dicen los estudios financieros sobre DDM, recompras y valuación por sectores?",
+      "expected_output": "Deep dive on Pillar 2 explaining why pure cash DDM diverges on low-payout/buyback compounders and why DCF fails on Financials, citing Boudoukh et al. (2007) Total Shareholder Yield, Damodaran / Nissim-Penman Residual Income for Financials, and Kim/Muhn/Nikolaev (arXiv:2407.17866) financial ratio deltas.",
+      "files": []
+    }
+  ]
+}

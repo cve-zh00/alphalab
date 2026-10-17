@@ -36,6 +36,8 @@ _SELECT_SQL = (
     "ORDER BY observed_at, value"
 )
 
+_SHARED_CON = duckdb.connect(database=":memory:")
+
 
 class ParquetPITStore:
     """Append-only PIT store backed by Parquet files under a root directory."""
@@ -44,16 +46,47 @@ class ParquetPITStore:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
         self._part = self._root / "facts.parquet"
+        self._con = _SHARED_CON
 
     def write(self, records: Iterable[PITRecord]) -> None:
-        """Persist records as Parquet, merging with any existing partition."""
+        """Persist records as Parquet, merging and deduplicating with any existing partition."""
         new_rows = [self._to_row(r) for r in records]
         if not new_rows:
             return
-        table = self._rows_to_table(new_rows)
         if self._part.exists():
             existing = pq.read_table(self._part)
-            table = pa.concat_tables([existing, table])
+            ex_cols = existing.to_pydict()
+            ex_keys = {
+                (
+                    ex_cols["ticker"][i],
+                    ex_cols["field"][i],
+                    ex_cols["value"][i],
+                    ex_cols["as_of"][i],
+                    ex_cols["observed_at"][i],
+                    ex_cols["source"][i],
+                    ex_cols["period_start"][i],
+                )
+                for i in range(existing.num_rows)
+            }
+            novel_rows = [
+                r
+                for r in new_rows
+                if (
+                    r["ticker"],
+                    r["field"],
+                    r["value"],
+                    r["as_of"],
+                    r["observed_at"],
+                    r["source"],
+                    r["period_start"],
+                )
+                not in ex_keys
+            ]
+            if not novel_rows:
+                return
+            table = pa.concat_tables([existing, self._rows_to_table(novel_rows)])
+        else:
+            table = self._rows_to_table(new_rows)
         pq.write_table(table, self._part)
 
     def query(
@@ -72,9 +105,8 @@ class ParquetPITStore:
             return []
         glob = self._parquet_glob()
         params = [glob, str(ticker), field, knowledge_date.value]
-        with duckdb.connect(database=":memory:") as con:
-            cursor = con.execute(_SELECT_SQL, params)
-            fetched = cursor.fetchall()
+        cursor = self._con.execute(_SELECT_SQL, params)
+        fetched = cursor.fetchall()
         return [self._to_record(row) for row in fetched]
 
     def _parquet_glob(self) -> str:

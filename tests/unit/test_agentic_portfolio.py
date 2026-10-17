@@ -216,3 +216,79 @@ def test_invalid_configuration_is_rejected() -> None:
         build_agentic_targets(as_of=_AS_OF, candidates=[], research=lambda t: None, max_positions=0)
     with pytest.raises(ValueError, match="slots"):
         equal_weight_targets([], slots=0)
+
+
+def test_conviction_volatility_sizing_tilts_toward_high_mos_low_vol() -> None:
+    """Conviction/volatility mode tilts weights toward higher upside and lower volatility."""
+
+    def research(ticker: Ticker) -> EquityResearchArtifact:
+        if ticker == Ticker("HIGH"):
+            return EquityResearchArtifact(
+                ticker="HIGH",
+                knowledge_date=_AS_OF,
+                verdict=Verdict.BUY,
+                price_target=PriceTarget(value=150.0, unit="USD_per_share"),
+                price_range=None,
+                current_price=100.0,
+                methods_used=("dcf", "multiples_pe"),
+                method_values={},
+                consensus_relative_span=0.15,
+                narrative_slots={},
+                fallback_slots={},
+                contract_stamps=(),
+                valuation_withheld=False,
+                single_method_disclosed=False,
+            )
+        return _artifact(str(ticker), Verdict.BUY)
+
+    plan = build_agentic_targets(
+        as_of=_AS_OF,
+        candidates=_tickers("HIGH", "LOW"),
+        research=research,
+        max_positions=20,
+        volatilities={Ticker("HIGH"): 0.15, Ticker("LOW"): 0.45},
+        sizing_mode="conviction",
+        max_position_weight=0.10,
+    )
+    assert plan.targets[Ticker("HIGH")] > plan.targets[Ticker("LOW")]
+    assert plan.targets[Ticker("HIGH")] <= 0.10
+
+
+def test_c1b_degraded_artifact_gets_conservative_upside() -> None:
+    from alphalab.artifact.models import PriceRange
+    from alphalab.domain.contract import enforce_contract
+
+    art = _artifact("AAA", Verdict.BUY).model_copy(
+        update={
+            "consensus_relative_span": 5.0,
+            "methods_used": ("dcf", "ddm", "pe"),
+            "price_range": PriceRange(low=1.2 * 100, mid=150.0, high=200.0),
+            "current_price": 100.0,
+        }
+    )
+    gated = enforce_contract(art).artifact
+    plan = build_agentic_targets(
+        as_of=date(2025, 1, 2), candidates=_tickers("AAA"), research=lambda t: gated
+    )
+    assert plan.outcomes[0].upside == pytest.approx(0.35)
+    assert plan.outcomes[0].detail == "conservative C1b target"
+
+
+def test_correlation_penalty_lowers_weight() -> None:
+    from alphalab.app.agentic_portfolio import conviction_volatility_targets
+
+    t = _tickers("AAA", "BBB")
+    base = conviction_volatility_targets(t, slots=20)
+    pen = conviction_volatility_targets(t, slots=20, correlations={t[0]: 0.95, t[1]: 0.2})
+    assert pen[t[0]] < base[t[0]]
+    assert pen[t[1]] >= base[t[1]]
+
+
+def test_sector_cap_scales_to_exactly_cap() -> None:
+    from alphalab.app.agentic_portfolio import conviction_volatility_targets
+
+    t = _tickers("A", "B", "C", "D", "E")
+    sectors = {x: "tech" for x in t[:4]} | {t[4]: "fin"}
+    w = conviction_volatility_targets(t, slots=5, max_weight=0.2, sectors=sectors)
+    assert sum(w[x] for x in t[:4]) == pytest.approx(0.25)
+    assert w[t[4]] == pytest.approx(0.2)

@@ -44,6 +44,7 @@ __all__ = [
     "expected_calibration_error",
     "overconfidence",
     "reliability_diagram",
+    "winkler_score",
 ]
 
 #: Default number of equal-width probability bins for ECE and the reliability
@@ -290,3 +291,35 @@ def calibration_report(
         reliability=reliability_diagram(probabilities, outcomes, n_bins=n_bins),
         decomposition=brier_decomposition(probabilities, outcomes, n_bins=n_bins),
     )
+
+
+def winkler_score(
+    lowers: Sequence[float],
+    uppers: Sequence[float],
+    realized: Sequence[float],
+    *,
+    alpha: float = 0.20,
+) -> float:
+    """Return the mean Winkler interval score for central ``(1 - alpha)`` intervals.
+
+    For interval ``[L, U]`` and realized value ``x``:
+    ``W = (U - L) + (2/alpha)*(L - x)*I(x < L) + (2/alpha)*(x - U)*I(x > U)``.
+    Lower is better (narrower intervals with fewer misses).
+    """
+    if not (0.0 < alpha < 1.0):
+        raise ValueError("alpha must be in (0, 1)")
+    if not (len(lowers) == len(uppers) == len(realized)):
+        raise ValueError("lowers, uppers, and realized must have equal length")
+    if len(lowers) == 0:
+        raise ValueError("cannot compute winkler_score on empty sequences")
+    l_arr = np.asarray(lowers, dtype=np.float64)
+    u_arr = np.asarray(uppers, dtype=np.float64)
+    x_arr = np.asarray(realized, dtype=np.float64)
+    if np.any(u_arr < l_arr):
+        raise ValueError("upper bound must be >= lower bound")
+    width = u_arr - l_arr
+    below = np.maximum(0.0, l_arr - x_arr)
+    above = np.maximum(0.0, x_arr - u_arr)
+    scores = width + (2.0 / alpha) * (below + above)
+    return float(np.mean(scores))
+
