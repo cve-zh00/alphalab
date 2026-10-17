@@ -58,7 +58,7 @@ from alphalab.cli.commands.paper import _price_provider
 from alphalab.cli.commands.predict import DEFAULT_HORIZON_DAYS
 from alphalab.cli.commands.research import _run_pipeline
 from alphalab.cli.fixtures import build_fixture_request
-from alphalab.cli.ingest import load_live_builder
+from alphalab.cli.ingest import load_live_builder, load_news_sentiment_fn
 from alphalab.cli.paper_transport import HttpxWriteTransport
 from alphalab.domain.backtest import PriceBar, ProportionalCostModel
 from alphalab.domain.costs import CostSpec
@@ -653,6 +653,12 @@ def _prescreen_for_llm(
             score = _dispersion_adjusted_mos(art)
             scored_buys.append((score, -idx, t))
     scored_buys.sort(reverse=True)
+    if sentiment_fn is None:
+        news_fn = None
+        with contextlib.suppress(Exception):
+            news_fn = load_news_sentiment_fn()
+        if news_fn is not None:
+            sentiment_fn = lambda t: news_fn(t, as_of)  # noqa: E731
     if sentiment_fn is not None:
         scored_buys = _apply_sentiment_penalty(scored_buys, sentiment_fn, limit=2 * max(1, cap))
     for _score, _neg_idx, t in scored_buys[: max(0, cap)]:

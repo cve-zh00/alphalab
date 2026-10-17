@@ -55,3 +55,22 @@ def test_prescreen_penalty():
         raise RuntimeError
 
     assert _apply_sentiment_penalty(scored, boom, limit=4)[0][2] == a
+
+
+def test_news_sentiment_fn_scores_headlines(tmp_path):
+    from datetime import date
+
+    from alphalab.adapters.finbert_sentiment import FinBertSentimentScorer
+    from alphalab.cli.ingest import load_news_sentiment_fn
+
+    class _News:
+        def recent_documents(self, ticker, *, knowledge_date, limit):
+            return ["Company faces fraud probe, shares plunge"] if ticker == "BAD" else []
+
+    fn = load_news_sentiment_fn(
+        news_client=_News(),  # type: ignore[arg-type]
+        sentiment_scorer=FinBertSentimentScorer(cache_path=tmp_path / "c.json"),
+    )
+    assert fn is not None
+    assert fn(Ticker("BAD"), date(2026, 10, 16)) < 0
+    assert fn(Ticker("OK"), date(2026, 10, 16)) is None

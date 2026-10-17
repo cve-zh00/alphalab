@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -426,6 +427,26 @@ def _build_live_request(
     return result.request.model_copy(
         update={"documents": (*result.request.documents, *extra_docs)}
     )
+
+
+def load_news_sentiment_fn(
+    *,
+    news_client: AlpacaNewsClient | None = None,
+    sentiment_scorer: FinBertSentimentScorer | None = None,
+) -> Callable[[Ticker, date], float | None] | None:
+    """Return ``(ticker, as_of) -> net news sentiment``, or ``None`` without Alpaca credentials."""
+    client = news_client or _maybe_default_news_client(HttpxWriteTransport())
+    if client is None:
+        return None
+    scorer = sentiment_scorer or FinBertSentimentScorer()
+
+    def _net(ticker: Ticker, as_of: date) -> float | None:
+        docs = client.recent_documents(ticker, knowledge_date=as_of, limit=5)
+        if not docs:
+            return None
+        return scorer.score_documents(docs).net_score
+
+    return _net
 
 
 def load_live_builder(
