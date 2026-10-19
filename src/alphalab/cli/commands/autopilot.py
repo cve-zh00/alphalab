@@ -178,7 +178,7 @@ class PanelPriceSeriesSource:
     def series(self, ticker: Ticker) -> list[PricePoint]:
         bars = self._panel.get(ticker)
         if bars:
-            return [PricePoint(on=b.on, close=b.close) for b in bars]
+            return [PricePoint(on=b.on, close=b.close, raw_close=b.raw_close) for b in bars]
         if self._fallback is not None:
             return self._fallback.series(ticker)
         return []

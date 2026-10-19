@@ -73,10 +73,19 @@ class RawBar:
     on: date
     close: float
     volume: float | None
+    high: float | None = None
+    low: float | None = None
 
-    def to_price_bar(self) -> PriceBar:
+    def to_price_bar(self, raw_close: float | None = None) -> PriceBar:
         """Convert to the domain :class:`PriceBar` (validates ``close > 0``)."""
-        return PriceBar(on=self.on, close=self.close, volume=self.volume)
+        return PriceBar(
+            on=self.on,
+            close=self.close,
+            volume=self.volume,
+            high=self.high if self.high and self.high > 0.0 else None,
+            low=self.low if self.low and self.low > 0.0 else None,
+            raw_close=raw_close if raw_close and raw_close > 0.0 else None,
+        )
 
 
 class AlpacaBarsClient:
@@ -92,6 +101,7 @@ class AlpacaBarsClient:
         max_retries: int = 5,
         base_backoff: float = 0.5,
         page_limit: int = 10_000,
+        with_raw_close: bool = False,
     ) -> None:
         self._settings = settings
         self._transport = transport
@@ -100,6 +110,7 @@ class AlpacaBarsClient:
         self._max_retries = max_retries
         self._base_backoff = base_backoff
         self._page_limit = page_limit
+        self._with_raw_close = with_raw_close
         self._limiter = RateLimiter(
             max_rps=settings.rate_limit_per_minute / _SECONDS_PER_MINUTE,
             clock=self._clock,
@@ -116,15 +127,26 @@ class AlpacaBarsClient:
         if not symbols:
             return {}
         raw = self._fetch_all_pages(symbols, start=start, end=end)
-        return self._group_to_domain(raw)
+        raw_closes: dict[tuple[str, date], float] = {}
+        if self._with_raw_close:
+            quoted = self._fetch_all_pages(symbols, start=start, end=end, adjustment="raw")
+            raw_closes = {(b.symbol, b.on): b.close for b in quoted}
+        return self._group_to_domain(raw, raw_closes)
 
     def _fetch_all_pages(
-        self, symbols: tuple[Ticker, ...] | list[Ticker], *, start: date, end: date
+        self,
+        symbols: tuple[Ticker, ...] | list[Ticker],
+        *,
+        start: date,
+        end: date,
+        adjustment: str = "all",
     ) -> list[RawBar]:
         bars: list[RawBar] = []
         page_token: str | None = None
         while True:
-            url = self._build_url(symbols, start=start, end=end, page_token=page_token)
+            url = self._build_url(
+                symbols, start=start, end=end, page_token=page_token, adjustment=adjustment
+            )
             payload = self._get_with_retry(url)
             bars.extend(_parse_bars(payload))
             page_token = _next_token(payload)
@@ -138,13 +160,14 @@ class AlpacaBarsClient:
         start: date,
         end: date,
         page_token: str | None,
+        adjustment: str = "all",
     ) -> str:
         joined = ",".join(str(s) for s in symbols)
         url = (
             f"{self._settings.data_base_url()}/v2/stocks/bars"
             f"?symbols={joined}&timeframe=1Day"
             f"&start={start.isoformat()}&end={end.isoformat()}"
-            f"&adjustment=all&feed={self._feed.value}&limit={self._page_limit}"
+            f"&adjustment={adjustment}&feed={self._feed.value}&limit={self._page_limit}"
         )
         if page_token is not None:
             url = f"{url}&page_token={page_token}"
@@ -172,10 +195,15 @@ class AlpacaBarsClient:
         raise RuntimeError(f"Alpaca bars request failed (status={last_status})")
 
     @staticmethod
-    def _group_to_domain(raw: list[RawBar]) -> dict[Ticker, tuple[PriceBar, ...]]:
+    def _group_to_domain(
+        raw: list[RawBar], raw_closes: dict[tuple[str, date], float] | None = None
+    ) -> dict[Ticker, tuple[PriceBar, ...]]:
+        quoted = raw_closes or {}
         grouped: dict[Ticker, list[PriceBar]] = {}
         for bar in raw:
-            grouped.setdefault(Ticker(bar.symbol), []).append(bar.to_price_bar())
+            grouped.setdefault(Ticker(bar.symbol), []).append(
+                bar.to_price_bar(quoted.get((bar.symbol, bar.on)))
+            )
         return {ticker: tuple(sorted(bars, key=lambda b: b.on)) for ticker, bars in grouped.items()}
 
 
@@ -203,11 +231,15 @@ def _parse_one(symbol: str, row: object) -> RawBar | None:
     if not isinstance(stamp, str) or not isinstance(close, int | float):
         return None
     volume = row.get("v")
+    high = row.get("h")
+    low = row.get("l")
     return RawBar(
         symbol=symbol,
         on=_parse_timestamp(stamp),
         close=float(close),
         volume=float(volume) if isinstance(volume, int | float) else None,
+        high=float(high) if isinstance(high, int | float) else None,
+        low=float(low) if isinstance(low, int | float) else None,
     )
 
 

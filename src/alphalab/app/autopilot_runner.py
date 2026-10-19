@@ -643,7 +643,9 @@ def _build_position_risks(
             else logged_entry_price
         )
         series = bars.get(ticker, ())
-        since_entry = [b.close for b in series if entry_date <= b.on <= as_of]
+        since_entry = [
+            max(b.close, b.high or b.close) for b in series if entry_date <= b.on <= as_of
+        ]
         peak = max([entry_price, pos.price, *since_entry])
         out[ticker] = PositionRiskSnapshot(
             ticker=ticker,

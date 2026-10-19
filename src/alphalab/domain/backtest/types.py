@@ -33,6 +33,12 @@ class PriceBar(BaseModel):
     on: date
     close: float = Field(gt=0.0)
     volume: float | None = Field(default=None, ge=0.0)
+    #: Intraday extremes (same adjustment basis as ``close``); optional.
+    high: float | None = Field(default=None, gt=0.0)
+    low: float | None = Field(default=None, gt=0.0)
+    #: As-quoted close (``adjustment=raw``). Valuation against as-reported
+    #: share counts must use this, not the split/dividend-adjusted ``close``.
+    raw_close: float | None = Field(default=None, gt=0.0)
 
 
 class RebalanceRecord(BaseModel):

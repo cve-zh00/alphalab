@@ -24,6 +24,7 @@ class PricePoint:
 
     on: date
     close: float
+    raw_close: float | None = None
 
 
 class PriceSeriesSource(Protocol):

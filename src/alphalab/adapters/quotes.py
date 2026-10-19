@@ -38,3 +38,24 @@ def current_price_at(
         )
     latest = max(eligible, key=lambda p: p.on)
     return latest.close
+
+
+def current_valuation_price_at(
+    source: PriceSeriesSource,
+    ticker: Ticker,
+    knowledge_date: KnowledgeDate,
+) -> float:
+    """Return the as-quoted close for valuation against as-reported share counts.
+
+    Falls back to the adjusted close when the source carries no raw close.
+    EDGAR share counts are not split-adjusted, so pairing them with an
+    ``adjustment=all`` price understates market cap after a later split.
+    """
+    cutoff = knowledge_date.value
+    eligible = [p for p in source.series(ticker) if p.on <= cutoff]
+    if not eligible:
+        raise NoPriceAvailableError(
+            f"no close on or before {cutoff!r} for {ticker!r}: refusing to read a future price"
+        )
+    latest = max(eligible, key=lambda p: p.on)
+    return latest.raw_close if latest.raw_close is not None else latest.close

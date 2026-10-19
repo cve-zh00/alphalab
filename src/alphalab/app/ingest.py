@@ -40,7 +40,7 @@ from alphalab.adapters.edgar import EdgarClient
 from alphalab.adapters.edgar_live import FundamentalField, extract_fundamentals
 from alphalab.adapters.pit_store import ParquetPITStore
 from alphalab.adapters.prices import PriceSeriesSource
-from alphalab.adapters.quotes import NoPriceAvailableError, current_price_at
+from alphalab.adapters.quotes import NoPriceAvailableError, current_valuation_price_at
 from alphalab.app.inputs import AnalystRequest, ValuationBundle
 from alphalab.domain.analyst.contracts import RunMetadata
 from alphalab.domain.compute import (
@@ -140,7 +140,7 @@ def build_request(
     kd = KnowledgeDate(knowledge_date)
     values = _resolve_fields(store, ticker, kd)
     try:
-        current_price = current_price_at(price_source, ticker, kd)
+        current_price = current_valuation_price_at(price_source, ticker, kd)
     except NoPriceAvailableError:
         current_price = float("nan")
     pit_cagr = _resolve_pit_cagr(store, ticker, kd)

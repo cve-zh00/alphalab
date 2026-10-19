@@ -297,3 +297,34 @@ class TestSecrets:
         url, headers = transport.calls[0]
         assert headers["APCA-API-SECRET-KEY"] == _SECRET
         assert _SECRET not in url
+
+
+class TestHighLowAndRawClose:
+    def test_high_low_are_parsed_and_raw_close_merged(self) -> None:
+        adjusted = {
+            "bars": {"DECK": [{"t": "2024-09-18T04:00:00Z", "c": 10.0, "h": 11.0, "l": 9.5}]}
+        }
+        quoted = {"bars": {"DECK": [{"t": "2024-09-18T04:00:00Z", "c": 100.0}]}}
+        transport = _StubTransport([HttpResponse(200, adjusted), HttpResponse(200, quoted)])
+        client = AlpacaBarsClient(
+            _settings(), transport=transport, clock=_FakeClock(), with_raw_close=True
+        )
+
+        bars = client.daily_bars([Ticker("DECK")], start=date(2024, 9, 1), end=date(2024, 9, 30))
+
+        bar = bars[Ticker("DECK")][0]
+        assert (bar.close, bar.high, bar.low, bar.raw_close) == (10.0, 11.0, 9.5, 100.0)
+        assert "adjustment=all" in transport.calls[0][0]
+        assert "adjustment=raw" in transport.calls[1][0]
+
+    def test_raw_close_off_by_default(self) -> None:
+        transport = _StubTransport(
+            [HttpResponse(200, {"bars": {"A": [_bar("2024-09-18T04:00:00Z", 5.0)]}})]
+        )
+        client = AlpacaBarsClient(_settings(), transport=transport, clock=_FakeClock())
+
+        bar = client.daily_bars([Ticker("A")], start=date(2024, 9, 1), end=date(2024, 9, 30))[
+            Ticker("A")
+        ][0]
+
+        assert bar.raw_close is None and len(transport.calls) == 1

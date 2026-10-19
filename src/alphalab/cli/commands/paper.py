@@ -185,7 +185,9 @@ def _price_provider(
         return _CsvPriceProvider(prices_dir, tickers=resolved)
 
     feed = DataFeed(os.environ.get("ALPHALAB_ALPACA_FEED", "sip").lower())
-    client = AlpacaBarsClient(settings, transport=HttpxWriteTransport(), feed=feed)
+    client = AlpacaBarsClient(
+        settings, transport=HttpxWriteTransport(), feed=feed, with_raw_close=True
+    )
     return AlpacaPriceProvider(
         client,
         tickers=resolved,
