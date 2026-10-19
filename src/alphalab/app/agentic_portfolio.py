@@ -60,6 +60,8 @@ DEFAULT_MAX_SECTOR_WEIGHT = 0.25
 
 #: Average pairwise correlation above which a name's score is penalized.
 CORRELATION_PENALTY_THRESHOLD = 0.60
+#: Max fractional deviation from the equal-weight base slot due to conviction/vol.
+MAX_TILT = 0.25
 
 SizingMode = Literal["equal", "conviction"]
 
@@ -278,10 +280,11 @@ def conviction_volatility_targets(
       ``0.75`` when valuation was withheld).
     * **Inverse volatility** scales down high-volatility names using 60-day
       annualized volatility clamped to ``[0.10, 0.80]``.
-    * **Approval-count scaling**: each approved name receives a base budget of
-      ``min(max_weight, max(1 / slots, 0.075))`` scaled by its relative
-      conviction/volatility score and clipped to ``[0.01, max_weight]``, with
-      gross exposure capped at ``1.0``.
+    * **Equal-weight base with a bounded tilt**: each approved name receives a
+      base budget of ``min(max_weight, max(1 / slots, 0.075))`` scaled by its
+      relative conviction/volatility score, with the tilt limited to
+      ``+/- MAX_TILT`` (25%), clipped to ``[0.01, max_weight]`` and gross
+      exposure capped at ``1.0``.
     """
     if slots <= 0:
         raise ValueError("slots must be positive")
@@ -315,6 +318,7 @@ def conviction_volatility_targets(
     weights: dict[Ticker, float] = {}
     for ticker in held:
         rel = raw_scores[ticker] / mean_score if mean_score > 0.0 else 1.0
+        rel = min(1.0 + MAX_TILT, max(1.0 - MAX_TILT, rel))
         w = min(max_weight, max(0.01, base_slot * rel))
         weights[ticker] = w
 

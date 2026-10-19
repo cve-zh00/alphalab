@@ -61,6 +61,11 @@ class RiskLimits(BaseModel):
     #: position above that limit is only trimmed once it exceeds this ceiling.
     max_drift_weight: float = Field(default=0.12, gt=0.0, le=1.0)
 
+    #: Tolerance band for held positions: when the current weight is within
+    #: this fraction of the target weight, no rebalancing trade is made. Avoids
+    #: churn from relative-sizing noise. Exits (target 0) are never suppressed.
+    rebalance_band: float = Field(default=0.30, ge=0.0, lt=1.0)
+
     #: Largest notional a single order may carry, as a fraction of equity.
     #: Caps the damage a mispriced or stale signal can do in one step.
     max_order_weight: float = Field(default=0.25, gt=0.0, le=1.0)

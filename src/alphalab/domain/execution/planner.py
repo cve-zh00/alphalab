@@ -58,6 +58,9 @@ def plan_trades(
         targets, rules, rejected, holdings=holdings, equity=equity, prices=prices
     )
     capped = _cap_gross(capped, rules, rejected)
+    capped = _apply_rebalance_band(
+        capped, rules, holdings=holdings, equity=equity, prices=prices
+    )
 
     intents: list[OrderIntent] = []
     for ticker in sorted(set(capped) | set(holdings)):
@@ -148,6 +151,30 @@ def _current_weight(
     if price is None or price <= 0.0:
         return 0.0
     return holding.shares * price / equity
+
+
+def _apply_rebalance_band(
+    targets: Mapping[Ticker, float],
+    rules: RiskLimits,
+    *,
+    holdings: Mapping[Ticker, Holding],
+    equity: float,
+    prices: Mapping[Ticker, float],
+) -> dict[Ticker, float]:
+    """Keep a held position as-is when it is already within the tolerance band."""
+    out = dict(targets)
+    if rules.rebalance_band <= 0.0:
+        return out
+    for ticker, weight in targets.items():
+        if weight <= 0.0:
+            continue
+        current = _current_weight(ticker, holdings, equity, prices)
+        if (
+            0.0 < current <= rules.max_drift_weight
+            and abs(current - weight) <= rules.rebalance_band * weight
+        ):
+            out[ticker] = current
+    return out
 
 
 def _cap_gross(
