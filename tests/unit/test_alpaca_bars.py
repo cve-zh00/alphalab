@@ -328,3 +328,18 @@ class TestHighLowAndRawClose:
         ][0]
 
         assert bar.raw_close is None and len(transport.calls) == 1
+
+    def test_intraday_highs_parses_snapshots(self) -> None:
+        snapshots = {
+            "UAL": {"dailyBar": {"h": 104.97}, "latestTrade": {"p": 101.98}},
+            "IT": {"dailyBar": {"h": 221.00}, "latestTrade": {"p": 221.46}},
+            "EMPTY": {},
+        }
+        transport = _StubTransport([HttpResponse(200, snapshots)])
+        client = AlpacaBarsClient(_settings(), transport=transport, clock=_FakeClock())
+
+        highs = client.intraday_highs([Ticker("UAL"), Ticker("IT")])
+
+        assert highs == {Ticker("UAL"): 104.97, Ticker("IT"): 221.46}
+        assert client.intraday_highs([]) == {}
+

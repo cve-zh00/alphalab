@@ -133,6 +133,15 @@ class AlpacaBarsClient:
             raw_closes = {(b.symbol, b.on): b.close for b in quoted}
         return self._group_to_domain(raw, raw_closes)
 
+    def intraday_highs(self, symbols: tuple[Ticker, ...] | list[Ticker]) -> dict[Ticker, float]:
+        """Return today's intraday high per symbol from Alpaca IEX snapshots."""
+        if not symbols:
+            return {}
+        joined = ",".join(str(s) for s in symbols)
+        url = f"{self._settings.data_base_url()}/v2/stocks/snapshots?symbols={joined}&feed=iex"
+        payload = self._get_with_retry(url)
+        return _parse_snapshot_highs(payload)
+
     def _fetch_all_pages(
         self,
         symbols: tuple[Ticker, ...] | list[Ticker],
@@ -252,3 +261,20 @@ def _parse_timestamp(value: str) -> date:
     """Parse an RFC 3339 timestamp (e.g. ``2021-01-04T05:00:00Z``) to a date."""
     normalized = value.replace("Z", "+00:00")
     return datetime.fromisoformat(normalized).date()
+
+
+def _parse_snapshot_highs(payload: dict[str, object]) -> dict[Ticker, float]:
+    """Extract ``max(dailyBar.h, latestTrade.p)`` per symbol from Alpaca snapshots."""
+    out: dict[Ticker, float] = {}
+    for symbol, snap in payload.items():
+        if not isinstance(symbol, str) or not isinstance(snap, dict):
+            continue
+        daily = snap.get("dailyBar")
+        trade = snap.get("latestTrade")
+        high = daily.get("h") if isinstance(daily, dict) else None
+        last = trade.get("p") if isinstance(trade, dict) else None
+        vals = [float(v) for v in (high, last) if isinstance(v, int | float) and v > 0]
+        if vals:
+            out[Ticker(symbol)] = max(vals)
+    return out
+

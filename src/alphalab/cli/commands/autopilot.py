@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TextIO
 
 from alphalab.adapters.abstention_store import SqliteAbstentionStore
+from alphalab.adapters.alpaca_bars import AlpacaBarsClient
 from alphalab.adapters.alpaca_broker import AlpacaBroker
 from alphalab.adapters.alpaca_config import AlpacaSettings
 from alphalab.adapters.execution_log import SqliteExecutionLog
@@ -546,6 +547,7 @@ def _build_runner(
     research = research_fn or _make_research_fn(opts, price_source=price_source, err=err)
     recorder = _make_forecast_recorder(opts, journal=journal, abstentions=abstentions)
     settler = _make_settlement_runner(journal=journal, price_source=price_source)
+    intraday_highs = _default_intraday_highs() if opts.source == "live" else None
     return AutopilotRunner(
         broker=broker,
         prices=prices,
@@ -555,11 +557,19 @@ def _build_runner(
         candidate_selector=selector,
         forecast_recorder=recorder,
         settlement_runner=settler,
+        intraday_highs=intraday_highs,
         guard_config=guard_cfg,
         max_positions=opts.max_positions,
         candidate_cap=opts.candidate_cap,
         strategy_name="nofx_llm_agent" if opts.use_llm else "nofx_agentic",
     )
+
+
+def _default_intraday_highs() -> Callable[[Sequence[Ticker]], Mapping[Ticker, float]] | None:
+    with contextlib.suppress(Exception):
+        client = AlpacaBarsClient(AlpacaSettings(), transport=HttpxWriteTransport())  # type: ignore[call-arg]
+        return lambda syms: client.intraday_highs(list(syms))
+    return None
 
 
 def _explicit_selector(

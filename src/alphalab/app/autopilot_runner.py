@@ -26,6 +26,7 @@ autonomous execution discipline:
 
 from __future__ import annotations
 
+import contextlib
 import math
 import statistics
 import time
@@ -97,6 +98,7 @@ __all__ = [
     "AutopilotRunner",
     "CandidateSelector",
     "ForecastRecorder",
+    "IntradayHighsProvider",
     "RuntimeHealth",
     "SettlementRunner",
     "select_liquid_candidates",
@@ -108,6 +110,7 @@ _NYSE_TZ = ZoneInfo("America/New_York")
 
 ForecastRecorder = Callable[[EquityResearchArtifact, date], Prediction | Abstention | None]
 SettlementRunner = Callable[[date], int]
+IntradayHighsProvider = Callable[[Sequence[Ticker]], Mapping[Ticker, float]]
 CandidateSelector = Callable[
     [date, Mapping[Ticker, Sequence[PriceBar]], Sequence[Ticker]],
     Sequence[Ticker],
@@ -190,6 +193,7 @@ class AutopilotRunner:
         candidate_selector: CandidateSelector | None = None,
         forecast_recorder: ForecastRecorder | None = None,
         settlement_runner: SettlementRunner | None = None,
+        intraday_highs: IntradayHighsProvider | None = None,
         limits: RiskLimits | None = None,
         guard_config: AutopilotGuardConfig | None = None,
         max_positions: int = DEFAULT_MAX_POSITIONS,
@@ -208,6 +212,7 @@ class AutopilotRunner:
         self._candidate_selector = candidate_selector
         self._forecast_recorder = forecast_recorder
         self._settlement_runner = settlement_runner
+        self._intraday_highs = intraday_highs
         self._limits = limits or RiskLimits(whole_shares_only=False)
         self._guard_config = guard_config or AutopilotGuardConfig()
         self._max_positions = max_positions
@@ -218,6 +223,7 @@ class AutopilotRunner:
         self._strategy_name = strategy_name
         self._now = now
         self._sell_streaks: dict[Ticker, int] = _prior_sell_streaks(execution_log)
+        self._peak_prices: dict[tuple[Ticker, date], float] = {}
 
     def run_cycle(self, *, as_of: date | None = None, submit: bool = False) -> AutopilotCycleResult:
         """Execute one full autonomous agentic trading cycle."""
@@ -250,7 +256,18 @@ class AutopilotRunner:
             correlations=_avg_correlations_60d(bars, decision_date, candidates),
         )
 
-        pos_risks = _build_position_risks(positions, bars, self._log, decision_date)
+        live_highs: Mapping[Ticker, float] = {}
+        if self._intraday_highs is not None and positions:
+            with contextlib.suppress(Exception):
+                live_highs = self._intraday_highs(tuple(positions))
+        pos_risks = _build_position_risks(
+            positions,
+            bars,
+            self._log,
+            decision_date,
+            intraday_highs=live_highs,
+            peak_memory=self._peak_prices,
+        )
         verdict_map: dict[Ticker, Verdict | None] = {
             o.ticker: o.verdict for o in agentic_plan.outcomes
         }
@@ -630,9 +647,13 @@ def _build_position_risks(
     bars: Mapping[Ticker, Sequence[PriceBar]],
     log: SqliteExecutionLog,
     as_of: date,
+    *,
+    intraday_highs: Mapping[Ticker, float] | None = None,
+    peak_memory: dict[tuple[Ticker, date], float] | None = None,
 ) -> dict[Ticker, PositionRiskSnapshot]:
     entries = _latest_entries(log)
     out: dict[Ticker, PositionRiskSnapshot] = {}
+    highs = intraday_highs or {}
     for ticker, pos in positions.items():
         if pos.shares <= 0.0 or pos.price <= 0.0:
             continue
@@ -646,7 +667,11 @@ def _build_position_risks(
         since_entry = [
             max(b.close, b.high or b.close) for b in series if entry_date <= b.on <= as_of
         ]
-        peak = max([entry_price, pos.price, *since_entry])
+        live_high = highs.get(ticker, 0.0)
+        remembered = peak_memory.get((ticker, entry_date), 0.0) if peak_memory is not None else 0.0
+        peak = max([entry_price, pos.price, live_high, remembered, *since_entry])
+        if peak_memory is not None:
+            peak_memory[(ticker, entry_date)] = peak
         out[ticker] = PositionRiskSnapshot(
             ticker=ticker,
             shares=pos.shares,
