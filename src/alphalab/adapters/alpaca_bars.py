@@ -184,10 +184,17 @@ class AlpacaBarsClient:
 
     def _get_with_retry(self, url: str) -> dict[str, object]:
         headers = self._settings.auth_headers()
-        last_status: int | None = None
+        last_status: int | str | None = None
         for attempt in range(self._max_retries + 1):
             self._limiter.acquire()
-            response = self._transport.get(url, headers=headers)
+            try:
+                response = self._transport.get(url, headers=headers)
+            except Exception as exc:
+                last_status = f"{type(exc).__name__}: {exc}"
+                if attempt < self._max_retries:
+                    self._clock.sleep(self._base_backoff * (2**attempt))
+                    continue
+                break
             if response.status_code == 200:
                 return response.json
             if response.status_code == _FORBIDDEN:
