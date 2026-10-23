@@ -46,6 +46,7 @@ class FakeBrokerTransport:
     trading_blocked: bool = False
     account_blocked: bool = False
     positions_payload: list[dict[str, object]] = field(default_factory=list)
+    clock_payload: dict[str, object] | None = None
     posts: list[dict[str, object]] = field(default_factory=list)
 
     def get(self, url: str, *, headers: dict[str, str]) -> HttpResponse:
@@ -62,6 +63,8 @@ class FakeBrokerTransport:
         if url.endswith("/v2/positions"):
             return HttpResponse(status_code=200, json=self.positions_payload)  # type: ignore[arg-type]
         if url.endswith("/v2/clock"):
+            if self.clock_payload is not None:
+                return HttpResponse(status_code=200, json=self.clock_payload)
             return HttpResponse(status_code=200, json={"is_open": self.market_open})
         return HttpResponse(status_code=200, json={})
 
@@ -330,5 +333,52 @@ def test_run_cycle_uses_broker_avg_entry_price_and_live_position_price(tmp_path:
     aapl_risk = result.position_risks[Ticker("AAPL")]
     assert aapl_risk.entry_price == 207.66
     assert aapl_risk.current_price == 207.31
+    assert aapl_risk.annualized_volatility is not None
     assert [i for i in result.cycle.plan.intents if i.ticker == Ticker("AAPL")] == []
+
+
+def test_require_market_open_blocks_closed_market_and_aligns_pre_open_sleep(
+    tmp_path: Path,
+) -> None:
+    transport = FakeBrokerTransport(
+        market_open=False,
+        clock_payload={
+            "is_open": False,
+            "timestamp": "2024-06-10T13:00:00Z",
+            "next_open": "2024-06-10T13:30:00Z",
+            "next_close": "2024-06-10T20:00:00Z",
+        },
+    )
+    ks = KillSwitch(halt_path=tmp_path / "HALT", env={})
+    broker = AlpacaBroker(_settings(), transport=transport, kill_switch=ks)
+    log = SqliteExecutionLog(tmp_path / "exec.sqlite")
+
+    runner = AutopilotRunner(
+        broker=broker,
+        prices=DictPrices(_panel()),
+        execution_log=log,
+        research=lambda t: _artifact(str(t), Verdict.BUY),
+        kill_switch=ks,
+        require_market_open=True,
+        now=_NOW,
+    )
+
+    result = runner.run_cycle(as_of=_AS_OF, submit=True)
+    assert result.cycle.submitted is False
+    assert result.cycle.skipped_reason is not None
+    assert "market is closed" in result.cycle.skipped_reason
+    assert transport.posts == []
+
+    # 30m (1800s) before open -> wakes 5m (300s) before open = 1500s sleep
+    assert runner._next_sleep_seconds(3600.0, False) == 1500.0
+
+    # 40m (2400s) before close while open -> wakes 10m (600s) before close = 1800s sleep
+    transport.clock_payload = {
+        "is_open": True,
+        "timestamp": "2024-06-10T19:20:00Z",
+        "next_open": "2024-06-11T13:30:00Z",
+        "next_close": "2024-06-10T20:00:00Z",
+    }
+    assert runner._next_sleep_seconds(3600.0, True) == 1800.0
+
 

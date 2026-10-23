@@ -310,6 +310,43 @@ class TestApplyNofxGuards:
         assert Ticker("AAPL") not in second.targets
         assert second.actions[0].kind is GuardActionKind.SELL_VERDICT_EXIT
 
+    def test_volatility_scaled_stop_loss_clamps_and_triggers(self) -> None:
+        from alphalab.domain.execution.nofx_guards import effective_stop_loss_pct
+
+        # Low-vol REIT (14% annualized -> ~0.88% daily -> clamped to -6.0% floor)
+        low_vol = PositionRiskSnapshot(
+            ticker=Ticker("REG"),
+            shares=10.0,
+            entry_price=100.0,
+            current_price=93.8,  # -6.2% triggers -6.0% stop!
+            peak_price=100.0,
+            annualized_volatility=0.14,
+        )
+        assert effective_stop_loss_pct(low_vol) == pytest.approx(-6.0)
+
+        # High-vol Tech (68% annualized -> ~4.28% daily -> clamped to -12.0% floor)
+        high_vol = PositionRiskSnapshot(
+            ticker=Ticker("IT"),
+            shares=10.0,
+            entry_price=100.0,
+            current_price=90.5,  # -9.5% survives -12.0% stop!
+            peak_price=100.0,
+            annualized_volatility=0.68,
+        )
+        assert effective_stop_loss_pct(high_vol) == pytest.approx(-12.0)
+
+        guarded = apply_nofx_guards(
+            as_of=_AS_OF,
+            proposed_targets={Ticker("REG"): 0.05, Ticker("IT"): 0.05},
+            verdicts={Ticker("REG"): Verdict.BUY, Ticker("IT"): Verdict.BUY},
+            positions={Ticker("REG"): low_vol, Ticker("IT"): high_vol},
+            max_positions=20,
+        )
+        assert Ticker("REG") not in guarded.targets
+        assert Ticker("IT") in guarded.targets
+        assert guarded.actions[0].ticker == Ticker("REG")
+        assert guarded.actions[0].kind is GuardActionKind.STOP_LOSS_EXIT
+
 
 class TestSectorCap:
     def _run(self, **kw: object):

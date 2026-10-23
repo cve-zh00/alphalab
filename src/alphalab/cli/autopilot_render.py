@@ -11,6 +11,7 @@ from alphalab.adapters.kill_switch import KillSwitchState
 from alphalab.app.autopilot_preflight import PreflightReport
 from alphalab.app.autopilot_runner import AGENTIC_STRATEGY_NAME, AutopilotCycleResult
 from alphalab.app.paper_models import Reconciliation, ShadowBenchmark
+from alphalab.domain.execution import effective_stop_loss_pct
 from alphalab.report.theme import Theme
 
 __all__ = [
@@ -167,6 +168,7 @@ def autopilot_cycle_json(
                 "price_pnl_pct": pos.price_pnl_pct,
                 "peak_pnl_pct": pos.peak_pnl_pct,
                 "profit_giveback_pct": pos.profit_giveback_pct,
+                "stop_loss_pct": effective_stop_loss_pct(pos),
             }
             for pos in result.position_risks.values()
         ],
@@ -240,11 +242,13 @@ def _position_risk_lines(result: AutopilotCycleResult, theme: Theme) -> list[str
     for pos in result.position_risks.values():
         pnl_col = "green" if pos.price_pnl_pct >= 0 else "red"
         pnl_txt = theme.paint(f"{pos.price_pnl_pct:+.2f}%", pnl_col)
+        stop_floor = effective_stop_loss_pct(pos)
         lines.append(
             f"    {pos.ticker:<8} qty={pos.shares:g} "
             f"entry=${pos.entry_price:,.2f} now=${pos.current_price:,.2f} "
             f"peak=${pos.peak_price:,.2f} pnl={pnl_txt} "
-            f"(peak {pos.peak_pnl_pct:+.2f}%, giveback {pos.profit_giveback_pct:.1f}%)"
+            f"(peak {pos.peak_pnl_pct:+.2f}%, giveback {pos.profit_giveback_pct:.1f}%, "
+            f"stop {stop_floor:+.2f}%)"
         )
     return lines
 

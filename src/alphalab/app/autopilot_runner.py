@@ -256,6 +256,19 @@ class AutopilotRunner:
             correlations=_avg_correlations_60d(bars, decision_date, candidates),
         )
 
+        if submit and self._require_market_open and not clock.is_open:
+            clock, account, raw_positions, open_orders = self._await_or_refresh_open(
+                clock, account, raw_positions, open_orders
+            )
+            if clock.is_open:
+                latest_prices = {
+                    **_latest_prices(bars),
+                    **{t: pos.price for t, pos in raw_positions.items() if pos.price > 0.0},
+                }
+                positions = _reconcile_positions_with_open_orders(
+                    raw_positions, open_orders, latest_prices
+                )
+
         live_highs: Mapping[Ticker, float] = {}
         if self._intraday_highs is not None and positions:
             with contextlib.suppress(Exception):
@@ -267,6 +280,7 @@ class AutopilotRunner:
             decision_date,
             intraday_highs=live_highs,
             peak_memory=self._peak_prices,
+            volatilities=volatilities,
         )
         verdict_map: dict[Ticker, Verdict | None] = {
             o.ticker: o.verdict for o in agentic_plan.outcomes
@@ -291,7 +305,8 @@ class AutopilotRunner:
                 sorted({*agentic_plan.targets, *positions}), None
             ),
         )
-        _update_sell_streaks(self._sell_streaks, positions, verdict_map, guarded.actions)
+        if not self._require_market_open or clock.is_open:
+            _update_sell_streaks(self._sell_streaks, positions, verdict_map, guarded.actions)
 
         plan = plan_trades(
             as_of=decision_date,
@@ -370,8 +385,61 @@ class AutopilotRunner:
                 break
             if stop_requested is not None and stop_requested():
                 break
-            sleep_fn(max(0.0, interval_seconds))
+            sleep_fn(self._next_sleep_seconds(interval_seconds, result.cycle.market_open))
         return results
+
+    def _await_or_refresh_open(
+        self,
+        clock: MarketClock,
+        account: AccountSnapshot,
+        raw_positions: dict[Ticker, BrokerPosition],
+        open_orders: tuple[BrokerOrder, ...],
+    ) -> tuple[
+        MarketClock,
+        AccountSnapshot,
+        dict[Ticker, BrokerPosition],
+        tuple[BrokerOrder, ...],
+    ]:
+        with contextlib.suppress(Exception):
+            clock = self._broker.clock()
+            if (
+                not clock.is_open
+                and clock.next_open is not None
+                and clock.timestamp is not None
+            ):
+                rem = (clock.next_open - clock.timestamp).total_seconds()
+                if 0.0 < rem <= 300.0:
+                    time.sleep(rem + 15.0)
+                    clock = self._broker.clock()
+            if clock.is_open:
+                account = self._broker.account()
+                raw_positions = self._broker.positions()
+                open_orders = (
+                    self._broker.open_orders()
+                    if hasattr(self._broker, "open_orders")
+                    else ()
+                )
+        return clock, account, raw_positions, open_orders
+
+    def _next_sleep_seconds(self, interval_seconds: float, was_market_open: bool) -> float:
+        base_wait = max(0.0, interval_seconds)
+        if base_wait <= 0.0:
+            return base_wait
+        with contextlib.suppress(Exception):
+            clock = self._broker.clock()
+            if clock.timestamp is None:
+                return base_wait
+            if not clock.is_open and clock.next_open is not None:
+                until_open = (clock.next_open - clock.timestamp).total_seconds()
+                pre_open_wait = max(5.0, until_open - 300.0)
+                if 0.0 < until_open <= base_wait + 300.0:
+                    return min(base_wait, pre_open_wait)
+            if clock.is_open and clock.next_close is not None:
+                until_close = (clock.next_close - clock.timestamp).total_seconds()
+                pre_close_wait = until_close - 600.0
+                if 60.0 < pre_close_wait < base_wait:
+                    return pre_close_wait
+        return base_wait
 
     def _choose_candidates(
         self,
@@ -650,10 +718,12 @@ def _build_position_risks(
     *,
     intraday_highs: Mapping[Ticker, float] | None = None,
     peak_memory: dict[tuple[Ticker, date], float] | None = None,
+    volatilities: Mapping[Ticker, float] | None = None,
 ) -> dict[Ticker, PositionRiskSnapshot]:
     entries = _latest_entries(log)
     out: dict[Ticker, PositionRiskSnapshot] = {}
     highs = intraday_highs or {}
+    vols = volatilities or {}
     for ticker, pos in positions.items():
         if pos.shares <= 0.0 or pos.price <= 0.0:
             continue
@@ -678,6 +748,7 @@ def _build_position_risks(
             entry_price=entry_price,
             current_price=pos.price,
             peak_price=peak,
+            annualized_volatility=vols.get(ticker),
         )
     return out
 

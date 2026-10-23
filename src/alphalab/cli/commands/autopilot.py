@@ -219,6 +219,7 @@ class AutopilotCycleOptions:
     drawdown_giveback_pct: float = 40.0
     cooldown_days: int = 3
     sell_confirmations_required: int = 2
+    require_market_open: bool = True
     tickers: tuple[str, ...] | None = None
     assume_verdict: Verdict | None = None
     interval_seconds: float = 3600.0
@@ -561,6 +562,7 @@ def _build_runner(
         guard_config=guard_cfg,
         max_positions=opts.max_positions,
         candidate_cap=opts.candidate_cap,
+        require_market_open=opts.require_market_open,
         strategy_name="nofx_llm_agent" if opts.use_llm else "nofx_agentic",
     )
 

@@ -19,6 +19,7 @@ from alphalab.domain.execution.nofx_guards import (
     GuardedTargets,
     PositionRiskSnapshot,
     apply_nofx_guards,
+    effective_stop_loss_pct,
     should_drawdown_close,
 )
 from alphalab.domain.execution.planner import plan_trades
@@ -42,6 +43,7 @@ __all__ = [
     "RiskLimits",
     "TradePlan",
     "apply_nofx_guards",
+    "effective_stop_loss_pct",
     "is_rebalance_due",
     "plan_trades",
     "quarter_of",

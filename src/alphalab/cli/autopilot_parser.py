@@ -156,6 +156,11 @@ def _add_cycle_flags(parser: argparse.ArgumentParser, *, allow_submit: bool) -> 
         default=3,
         help="Re-entry cooldown in calendar days after a sell (default: 3).",
     )
+    parser.add_argument(
+        "--allow-closed-market",
+        action="store_true",
+        help="Allow submitting orders when the market clock is CLOSED (default: blocked).",
+    )
     if allow_submit:
         group = parser.add_mutually_exclusive_group()
         group.add_argument(
@@ -293,6 +298,7 @@ def _cycle_options_from_args(
         drawdown_trigger_pct=args.drawdown_trigger_pct,
         drawdown_giveback_pct=args.drawdown_giveback_pct,
         cooldown_days=args.cooldown_days,
+        require_market_open=not bool(getattr(args, "allow_closed_market", False)),
         tickers=tickers,
         assume_verdict=assume,
         interval_seconds=float(getattr(args, "interval_seconds", 3600.0)),

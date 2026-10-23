@@ -35,6 +35,7 @@ Pure by construction: no I/O, no network, no clock lookup.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from datetime import date
 from enum import StrEnum
@@ -48,17 +49,24 @@ __all__ = [
     "DEFAULT_DRAWDOWN_ARM_GAIN_PCT",
     "DEFAULT_DRAWDOWN_GIVEBACK_PCT",
     "DEFAULT_REENTRY_COOLDOWN_DAYS",
+    "DEFAULT_STOP_LOSS_MAX_PCT",
+    "DEFAULT_STOP_LOSS_MIN_PCT",
     "DEFAULT_STOP_LOSS_PCT",
+    "DEFAULT_STOP_LOSS_VOL_MULT",
     "AutopilotGuardConfig",
     "GuardAction",
     "GuardActionKind",
     "GuardedTargets",
     "PositionRiskSnapshot",
     "apply_nofx_guards",
+    "effective_stop_loss_pct",
     "should_drawdown_close",
 ]
 
 DEFAULT_STOP_LOSS_PCT = -8.0
+DEFAULT_STOP_LOSS_VOL_MULT = 3.5
+DEFAULT_STOP_LOSS_MIN_PCT = -6.0
+DEFAULT_STOP_LOSS_MAX_PCT = -12.0
 DEFAULT_DRAWDOWN_ARM_GAIN_PCT = 5.0
 DEFAULT_DRAWDOWN_GIVEBACK_PCT = 40.0
 DEFAULT_REENTRY_COOLDOWN_DAYS = 3
@@ -70,6 +78,10 @@ class AutopilotGuardConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     stop_loss_pct: float = Field(default=DEFAULT_STOP_LOSS_PCT, lt=0.0)
+    stop_loss_vol_mult: float = Field(default=DEFAULT_STOP_LOSS_VOL_MULT, gt=0.0)
+    stop_loss_min_pct: float = Field(default=DEFAULT_STOP_LOSS_MIN_PCT, lt=0.0)
+    stop_loss_max_pct: float = Field(default=DEFAULT_STOP_LOSS_MAX_PCT, lt=0.0)
+    volatility_scaled_stop_loss: bool = True
     drawdown_arm_gain_pct: float = Field(default=DEFAULT_DRAWDOWN_ARM_GAIN_PCT, gt=0.0)
     drawdown_giveback_pct: float = Field(default=DEFAULT_DRAWDOWN_GIVEBACK_PCT, gt=0.0, le=100.0)
     reentry_cooldown_days: int = Field(default=DEFAULT_REENTRY_COOLDOWN_DAYS, ge=0)
@@ -89,6 +101,7 @@ class PositionRiskSnapshot(BaseModel):
     entry_price: float = Field(gt=0.0)
     current_price: float = Field(gt=0.0)
     peak_price: float = Field(gt=0.0)
+    annualized_volatility: float | None = Field(default=None, ge=0.0)
 
     @property
     def effective_peak_price(self) -> float:
@@ -148,6 +161,30 @@ class GuardedTargets(BaseModel):
     actions: tuple[GuardAction, ...]
     safe_mode: bool = False
     safe_mode_reason: str | None = None
+
+
+def effective_stop_loss_pct(
+    snapshot: PositionRiskSnapshot,
+    config: AutopilotGuardConfig | None = None,
+) -> float:
+    """Return the effective stop-loss floor (in %) for ``snapshot``.
+
+    When ``volatility_scaled_stop_loss`` is enabled and the position carries a
+    positive 60-day annualized volatility $\\sigma_{\\text{ann}}$, the stop floor
+    scales to $-k_{\\sigma} \\cdot (\\sigma_{\\text{ann}} / \\sqrt{252}) \\cdot 100$
+    and is clamped between ``stop_loss_max_pct`` (default ``-12.0%``) and
+    ``stop_loss_min_pct`` (default ``-6.0%``). Falls back to ``stop_loss_pct``
+    when volatility is unavailable.
+    """
+    rules = config or AutopilotGuardConfig()
+    vol = snapshot.annualized_volatility
+    if not rules.volatility_scaled_stop_loss or vol is None or vol <= 0.0:
+        return rules.stop_loss_pct
+    daily_vol_pct = (vol / math.sqrt(252.0)) * 100.0
+    raw_stop = -rules.stop_loss_vol_mult * daily_vol_pct
+    low_bound = min(rules.stop_loss_min_pct, rules.stop_loss_max_pct)
+    high_bound = max(rules.stop_loss_min_pct, rules.stop_loss_max_pct)
+    return max(low_bound, min(high_bound, raw_stop))
 
 
 def should_drawdown_close(
@@ -328,13 +365,14 @@ def _protective_exit_for(
     rules: AutopilotGuardConfig,
 ) -> GuardAction | None:
     """Return a forced-exit action if a risk or signal rule fires, else None."""
-    if pos.price_pnl_pct <= rules.stop_loss_pct:
+    stop_floor = effective_stop_loss_pct(pos, rules)
+    if pos.price_pnl_pct <= stop_floor:
         return GuardAction(
             ticker=pos.ticker,
             kind=GuardActionKind.STOP_LOSS_EXIT,
             reason=(
                 f"stop-loss triggered: price P&L {pos.price_pnl_pct:+.2f}% "
-                f"<= {rules.stop_loss_pct:+.2f}% floor"
+                f"<= {stop_floor:+.2f}% floor"
             ),
         )
     if should_drawdown_close(pos, rules):
