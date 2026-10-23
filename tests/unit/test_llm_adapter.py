@@ -94,3 +94,24 @@ class TestRunMetadata:
             dataset_hash="h",
         )
         assert meta.llm_cutoff is not None
+
+    def test_run_with_retry_recovers_from_transient_http_500(self) -> None:
+        adapter = OllamaLLMAdapter()
+        calls: list[object] = []
+
+        class _FakeResult:
+            output = "ok"
+
+        class _FakeAgent:
+            def run_sync(self, prompt: str, model_settings: object = None) -> _FakeResult:
+                calls.append(model_settings)
+                if len(calls) == 1:
+                    raise RuntimeError("XML syntax error on line 13: element <parameter>")
+                return _FakeResult()
+
+        out = adapter._run_with_retry(_FakeAgent(), "prompt")  # type: ignore[arg-type]
+        assert out == "ok"
+        assert len(calls) == 2
+        assert calls[0] is None
+        assert calls[1] is not None
+

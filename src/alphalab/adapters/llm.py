@@ -113,16 +113,33 @@ class OllamaLLMAdapter:
         prompt = self._extraction_prompt(
             request, anonymize=self._settings.anonymize_ticker
         )
-        result = self._quick_agent.run_sync(prompt)
-        return tuple(result.output)
+        return tuple(self._run_with_retry(self._quick_agent, prompt))
 
     def narrate(self, request: NarrationRequest) -> ThesisNarrative:
         """Synthesise the thesis narrative via the deep-think agent."""
         prompt = self._narration_prompt(
             request, anonymize=self._settings.anonymize_ticker
         )
-        result = self._deep_agent.run_sync(prompt)
-        return result.output
+        return self._run_with_retry(self._deep_agent, prompt)
+
+    def _run_with_retry(self, agent: Agent[None, object], prompt: str) -> object:  # type: ignore[type-var]
+        last_exc: Exception | None = None
+        attempts = max(1, self._settings.max_retries + 1)
+        for attempt in range(attempts):
+            try:
+                if attempt == 0:
+                    return agent.run_sync(prompt).output
+                retry_settings = ModelSettings(
+                    timeout=self._settings.timeout_seconds,
+                    temperature=max(0.2, self._settings.temperature),
+                    seed=(self._settings.seed or 42) + attempt,
+                    extra_body={"reasoning_effort": "none"},
+                )
+                return agent.run_sync(prompt, model_settings=retry_settings).output
+            except Exception as exc:
+                last_exc = exc
+        assert last_exc is not None
+        raise last_exc
 
     def run_metadata(
         self,
@@ -162,14 +179,17 @@ class OllamaLLMAdapter:
     @staticmethod
     def _extraction_prompt(request: ExtractionRequest, *, anonymize: bool = False) -> str:
         label = "COMPANY_X" if anonymize else request.ticker
-        joined = "\n\n---\n\n".join(request.documents)
+        joined = "\n\n---\n\n".join(
+            doc.replace("<", "(").replace(">", ")") for doc in request.documents
+        )
         return f"Ticker: {label}\n\nSource documents:\n{joined}"
 
     @staticmethod
     def _narration_prompt(request: NarrationRequest, *, anonymize: bool = False) -> str:
         label = "COMPANY_X" if anonymize else request.ticker
         facts = "\n".join(
-            f"- [{f.category}/{f.direction.value}] {f.evidence_quote} ({f.source})"
+            f"- [{f.category}/{f.direction.value}] "
+            f"{f.evidence_quote.replace('<', '(').replace('>', ')')} ({f.source})"
             for f in request.findings
         )
         numbers = "\n".join(f"- {name}: {value}" for name, value in request.valuation_summary)
