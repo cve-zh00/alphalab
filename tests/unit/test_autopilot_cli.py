@@ -265,3 +265,103 @@ def test_cik_resolver_normalizes_dots_and_hyphens(tmp_path: Path) -> None:
     )
     assert resolver.resolve(Ticker("BRK.B")) == "0001067983"
     assert resolver.resolve(Ticker("BF-A")) == "0000014693"
+
+
+def test_dispersion_adjusted_mos_supports_c1b_and_penalizes_single_method() -> None:
+    from alphalab.artifact import EquityResearchArtifact, PriceRange, PriceTarget, Verdict
+    from alphalab.cli.commands.autopilot import _dispersion_adjusted_mos
+
+    # Unanimous multi-method C1b (withheld point target, but range.low > price)
+    c1b_art = EquityResearchArtifact(
+        ticker="LULU",
+        knowledge_date=date(2026, 10, 27),
+        verdict=Verdict.BUY,
+        current_price=100.0,
+        price_target=None,
+        price_range=PriceRange(low=140.0, mid=200.0, high=260.0),
+        methods_used=("dcf", "pe", "ev_ebitda"),
+        consensus_relative_span=0.60,
+        valuation_withheld=True,
+        contract_stamps=("[CONTRACT/contract_c1b_corroboration]",),
+    )
+    # Single-method C6 with artificial span=0.0
+    single_art = EquityResearchArtifact(
+        ticker="INTC",
+        knowledge_date=date(2026, 10, 27),
+        verdict=Verdict.BUY,
+        current_price=100.0,
+        price_target=PriceTarget(value=120.0, unit="USD_per_share"),
+        methods_used=("pb",),
+        single_method_disclosed=True,
+        consensus_relative_span=0.0,
+        valuation_withheld=False,
+    )
+
+    c1b_score = _dispersion_adjusted_mos(c1b_art)
+    single_score = _dispersion_adjusted_mos(single_art)
+    # c1b conservative target = 0.5*(140+200) = 170 -> +70% / 0.60 = 1.167
+    # single method = +20% / 1.0 (single-method floor) = 0.20
+    assert c1b_score == pytest.approx(0.70 / 0.60)
+    assert single_score == pytest.approx(0.20)
+    assert c1b_score > single_score
+
+
+def test_prescreen_for_llm_excludes_cooldown_and_rotates_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from alphalab.artifact import EquityResearchArtifact, PriceRange, Verdict
+    from alphalab.cli.commands import autopilot as ap
+
+    monkeypatch.setattr(
+        ap,
+        "load_live_builder",
+        lambda **_kw: lambda sym, knowledge_date: sym,
+    )
+
+    def _fake_pipeline(req: object, **_kw: object) -> EquityResearchArtifact:
+        sym = str(req)
+        rank_boost = {"AAA": 220.0, "BBB": 200.0, "CCC": 180.0, "DDD": 160.0, "EEE": 150.0}[sym]
+        return EquityResearchArtifact(
+            ticker=sym,
+            knowledge_date=date(2026, 10, 27),
+            verdict=Verdict.BUY,
+            current_price=100.0,
+            price_target=None,
+            price_range=PriceRange(low=120.0, mid=rank_boost, high=260.0),
+            methods_used=("dcf", "pe", "pb"),
+            consensus_relative_span=0.50,
+            valuation_withheld=True,
+            contract_stamps=("[CONTRACT/contract_c1b_corroboration]",),
+        )
+
+    monkeypatch.setattr(ap, "_run_pipeline", _fake_pipeline)
+    names = [Ticker(s) for s in ("AAA", "BBB", "CCC", "DDD", "EEE")]
+
+    # AAA is excluded (cooldown); first batch of cap=2 picks BBB, CCC
+    batch1 = ap._prescreen_for_llm(
+        names,
+        held_tickers=[Ticker("HELD")],
+        cap=2,
+        source="live",
+        as_of=date(2026, 10, 27),
+        price_source=object(),  # type: ignore[arg-type]
+        sentiment_fn=lambda _t: 0.0,
+        excluded_tickers={Ticker("AAA")},
+        deprioritized_tickers=set(),
+    )
+    assert batch1 == (Ticker("HELD"), Ticker("BBB"), Ticker("CCC"))
+
+    # Next cycle deprioritizes BBB, CCC (already evaluated as HOLD) -> rotates to DDD, EEE
+    batch2 = ap._prescreen_for_llm(
+        names,
+        held_tickers=[Ticker("HELD")],
+        cap=2,
+        source="live",
+        as_of=date(2026, 10, 27),
+        price_source=object(),  # type: ignore[arg-type]
+        sentiment_fn=lambda _t: 0.0,
+        excluded_tickers={Ticker("AAA")},
+        deprioritized_tickers={Ticker("BBB"), Ticker("CCC")},
+    )
+    assert batch2 == (Ticker("HELD"), Ticker("DDD"), Ticker("EEE"))
+

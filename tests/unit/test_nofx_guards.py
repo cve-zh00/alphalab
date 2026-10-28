@@ -384,3 +384,33 @@ class TestSectorCap:
         assert Ticker("AAA") in res.targets
         assert Ticker("BBB") not in res.targets
         assert Ticker("CCC") not in res.targets
+
+    def test_cash_headroom_bounds_new_entries_without_trimming_held(self) -> None:
+        pos = {
+            Ticker("HELD"): PositionRiskSnapshot(
+                ticker=Ticker("HELD"),
+                shares=10.0,
+                entry_price=100.0,
+                current_price=100.0,
+                peak_price=100.0,
+            )
+        }
+        res = apply_nofx_guards(
+            as_of=_AS_OF,
+            proposed_targets={
+                Ticker("NEW1"): 0.15,
+                Ticker("NEW2"): 0.12,
+                Ticker("NEW3"): 0.10,
+            },
+            verdicts={Ticker("HELD"): Verdict.HOLD},
+            positions=pos,
+            current_weights={Ticker("HELD"): 0.80},
+            max_positions=10,
+        )
+        # HELD keeps 0.80; remaining 0.20 headroom admits NEW1 (0.15) and scales NEW2 (0.05)
+        assert res.targets[Ticker("HELD")] == pytest.approx(0.80)
+        assert res.targets[Ticker("NEW1")] == pytest.approx(0.15)
+        assert res.targets[Ticker("NEW2")] == pytest.approx(0.05)
+        assert Ticker("NEW3") not in res.targets
+        assert sum(res.targets.values()) == pytest.approx(1.0)
+

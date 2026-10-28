@@ -270,6 +270,7 @@ def apply_nofx_guards(
             actions=actions,
         )
     capped = _enforce_slot_ceiling(surviving, positions=positions, max_positions=max_positions)
+    capped = _enforce_cash_headroom(capped, positions=positions)
     reason = safe_mode_reason or "model evaluation coverage below minimum threshold"
     return GuardedTargets(
         targets=capped,
@@ -533,3 +534,28 @@ def _enforce_slot_ceiling(
     kept = held_first[:max_positions]
     weight = 1.0 / max_positions
     return {t: weight for t in sorted(kept)}
+
+
+def _enforce_cash_headroom(
+    surviving: Mapping[Ticker, float],
+    *,
+    positions: Mapping[Ticker, PositionRiskSnapshot],
+) -> dict[Ticker, float]:
+    """Bound new entries to available cash headroom so existing positions are never trimmed."""
+    if not positions or sum(surviving.values()) <= 1.0 + 1e-9:
+        return dict(surviving)
+    out: dict[Ticker, float] = {t: w for t, w in surviving.items() if t in positions}
+    room = max(0.0, 1.0 - sum(out.values()))
+    new_entries = sorted(
+        (t for t in surviving if t not in positions),
+        key=lambda t: (-surviving[t], str(t)),
+    )
+    for t in new_entries:
+        w = surviving[t]
+        if w <= room + 1e-12:
+            out[t] = w
+            room = max(0.0, room - w)
+        elif room >= 0.01:
+            out[t] = room
+            room = 0.0
+    return out

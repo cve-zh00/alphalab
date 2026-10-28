@@ -20,7 +20,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -42,6 +42,7 @@ from alphalab.app.autopilot_runner import (
     CandidateSelector,
     ForecastRecorder,
     SettlementRunner,
+    _recent_sell_dates,
     select_liquid_candidates,
 )
 from alphalab.app.forecast_runner import register_forecast, settle_due_predictions
@@ -62,6 +63,7 @@ from alphalab.cli.fixtures import build_fixture_request
 from alphalab.cli.ingest import load_live_builder, load_news_sentiment_fn
 from alphalab.cli.paper_transport import HttpxWriteTransport
 from alphalab.domain.backtest import PriceBar, ProportionalCostModel
+from alphalab.domain.contract.gate import conservative_c1b_upside
 from alphalab.domain.costs import CostSpec
 from alphalab.domain.execution import AutopilotGuardConfig
 from alphalab.domain.forecast import Abstention
@@ -529,6 +531,8 @@ def _build_runner(
             source=opts.source,
             as_of=opts.as_of,
             price_source=price_source,
+            exec_log=exec_log,
+            cooldown_days=opts.cooldown_days,
         )
     else:
 
@@ -582,16 +586,20 @@ def _explicit_selector(
     source: str = "fixture",
     as_of: date | None = None,
     price_source: PriceSeriesSource | None = None,
+    exec_log: SqliteExecutionLog | None = None,
+    cooldown_days: int = 0,
 ) -> CandidateSelector:
     explicit = [Ticker(t) for t in expand_ticker_aliases(tickers)]
+    seen_by_date: dict[date, set[Ticker]] = {}
 
     def _select(
         eval_date: date,
         bars: Mapping[Ticker, Sequence[PriceBar]],
         held_tickers: Sequence[Ticker],
     ) -> Sequence[Ticker]:
+        effective_date = as_of or eval_date
         if isinstance(price_source, PanelPriceSeriesSource):
-            price_source.current_as_of = as_of or eval_date
+            price_source.current_as_of = effective_date
             price_source.update_panel(bars)
         combined = dict.fromkeys([*explicit, *held_tickers])
         combined.pop(Ticker("SPY"), None)
@@ -607,14 +615,32 @@ def _explicit_selector(
             names.sort(key=_med_dv, reverse=True)
         if not use_llm or len(names) <= cap:
             return tuple(names)
-        return _prescreen_for_llm(
+        cooldown_blocked: set[Ticker] = set()
+        if exec_log is not None and cooldown_days > 0:
+            cooldown_blocked = {
+                t
+                for t, sell_d in _recent_sell_dates(exec_log).items()
+                if 0 <= (effective_date - sell_d).days < cooldown_days
+            }
+        seen_today = seen_by_date.setdefault(effective_date, set())
+        held_set = set(held_tickers)
+        deprioritized = seen_today - held_set
+        chosen = _prescreen_for_llm(
             names,
             held_tickers=held_tickers,
             cap=cap,
             source=source,
-            as_of=as_of or eval_date,
+            as_of=effective_date,
             price_source=price_source,
+            excluded_tickers=cooldown_blocked,
+            deprioritized_tickers=deprioritized,
         )
+        new_candidates = [t for t in chosen if t not in held_set]
+        if any(t in deprioritized for t in new_candidates):
+            # Wrapped around the rotation pool: reset seen_today to current batch
+            seen_today.clear()
+        seen_today.update(new_candidates)
+        return chosen
 
     return _select
 
@@ -628,6 +654,9 @@ def _prescreen_for_llm(
     as_of: date,
     price_source: PriceSeriesSource | None,
     sentiment_fn: Callable[[Ticker], float | None] | None = None,
+    excluded_tickers: Set[Ticker] = frozenset(),
+    deprioritized_tickers: Set[Ticker] = frozenset(),
+    rotation_pool_size: int = 30,
 ) -> tuple[Ticker, ...]:
     """Two-stage S&P 500 funnel: fast PIT + ContractGate screen before live LLM.
 
@@ -644,7 +673,7 @@ def _prescreen_for_llm(
     if live_builder is None:
         new_added = 0
         for t in names:
-            if t in selected:
+            if t in selected or t in excluded_tickers:
                 continue
             if new_added >= cap:
                 break
@@ -654,17 +683,19 @@ def _prescreen_for_llm(
 
     scored_buys: list[tuple[float, int, Ticker]] = []
     for idx, t in enumerate(names):
-        if t in selected:
+        if t in selected or t in excluded_tickers:
             continue
         try:
             req = live_builder(str(t), knowledge_date=as_of)
             art = _run_pipeline(req, use_llm=False, debate=False)
         except Exception:
             continue
-        if art.verdict is Verdict.BUY and not art.valuation_withheld:
+        if art.verdict is Verdict.BUY:
             score = _dispersion_adjusted_mos(art)
-            scored_buys.append((score, -idx, t))
+            if score > 0.0:
+                scored_buys.append((score, -idx, t))
     scored_buys.sort(reverse=True)
+    pool_limit = max(rotation_pool_size, 3 * max(1, cap))
     if sentiment_fn is None:
         news_fn = None
         with contextlib.suppress(Exception):
@@ -672,9 +703,18 @@ def _prescreen_for_llm(
         if news_fn is not None:
             sentiment_fn = lambda t: news_fn(t, as_of)  # noqa: E731
     if sentiment_fn is not None:
-        scored_buys = _apply_sentiment_penalty(scored_buys, sentiment_fn, limit=2 * max(1, cap))
-    for _score, _neg_idx, t in scored_buys[: max(0, cap)]:
-        selected.append(t)
+        scored_buys = _apply_sentiment_penalty(scored_buys, sentiment_fn, limit=pool_limit)
+    pool = [t for _score, _neg_idx, t in scored_buys[:pool_limit]]
+    fresh = [t for t in pool if t not in deprioritized_tickers]
+    target_cap = max(0, cap)
+    batch = fresh[:target_cap]
+    if len(batch) < target_cap:
+        for t in pool:
+            if len(batch) >= target_cap:
+                break
+            if t not in batch:
+                batch.append(t)
+    selected.extend(batch)
     return tuple(selected)
 
 
@@ -699,12 +739,27 @@ def _apply_sentiment_penalty(
 
 
 def _dispersion_adjusted_mos(art: EquityResearchArtifact) -> float:
-    """Compute dispersion-adjusted Margin of Safety ``(median/P - 1) / max(span, 0.15)``."""
-    if art.price_target is None or art.current_price <= 0.0:
+    """Compute dispersion-adjusted Margin of Safety ``upside / max(span, floor)``.
+
+    Supports both exact point targets (``not art.valuation_withheld``) and
+    unanimous multi-method C1b ranges via ``conservative_c1b_upside(art)``.
+    Single-method valuations receive a dispersion floor of ``1.0`` so
+    multi-method corroborated stocks rank ahead of single-method C6 names.
+    """
+    if art.current_price <= 0.0:
         return -1e9
-    upside = art.price_target.value / art.current_price - 1.0
-    span = art.consensus_relative_span if art.consensus_relative_span is not None else 0.15
-    return upside / max(span, 0.15)
+    if not art.valuation_withheld and art.price_target is not None:
+        upside = art.price_target.value / art.current_price - 1.0
+    else:
+        c1b_upside = conservative_c1b_upside(art)
+        if c1b_upside is None or c1b_upside < 0.10 or c1b_upside > 2.0:
+            return -1e9
+        upside = c1b_upside
+    if upside <= 0.0:
+        return -1e9
+    raw_span = art.consensus_relative_span if art.consensus_relative_span is not None else 0.15
+    span_floor = 0.15 if len(art.methods_used) >= 2 else 1.0
+    return upside / max(raw_span, span_floor)
 
 
 def _make_research_fn(
