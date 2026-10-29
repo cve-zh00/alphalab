@@ -819,12 +819,20 @@ def _make_research_fn(
                 fp = compute_request_fingerprint(
                     request, llm_version=llm_version, debate=opts.debate
                 )
-                cached = verdict_cache.get(fp)
+                candidate_cached = verdict_cache.get(fp)
+                if candidate_cached is not None and candidate_cached.verdict is not Verdict.SELL:
+                    cached = candidate_cached.model_copy(
+                        update={"current_price": request.current_price}
+                    )
             if cached is not None:
                 artifact = cached
             else:
                 artifact = _run_pipeline(request, use_llm=opts.use_llm, debate=opts.debate)
-                if verdict_cache is not None and fp is not None:
+                if (
+                    verdict_cache is not None
+                    and fp is not None
+                    and artifact.verdict is not Verdict.SELL
+                ):
                     verdict_cache.put(fp, artifact)
             if opts.assume_verdict is not None and not opts.use_llm:
                 artifact = artifact.model_copy(update={"verdict": opts.assume_verdict})
