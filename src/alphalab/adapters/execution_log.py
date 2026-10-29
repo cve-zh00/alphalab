@@ -38,7 +38,7 @@ from pathlib import Path
 __all__ = ["SCHEMA_VERSION", "ExecutionEvent", "ExecutionEventKind", "SqliteExecutionLog"]
 
 #: Bump when the physical schema changes; add an idempotent migration step.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class ExecutionEventKind(StrEnum):
@@ -46,6 +46,7 @@ class ExecutionEventKind(StrEnum):
 
     INTENT = "intent"
     SUBMITTED = "submitted"
+    FILLED = "filled"
     DUPLICATE = "duplicate"
     HALTED = "halted"
     FAILED = "failed"
@@ -94,6 +95,11 @@ CREATE TABLE IF NOT EXISTS execution_events (
 _CREATE_INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_events_cycle ON execution_events(cycle_id)",
     "CREATE INDEX IF NOT EXISTS idx_events_recorded_at ON execution_events(recorded_at)",
+    (
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_unique_fill "
+        "ON execution_events(broker_order_id, kind) "
+        "WHERE kind = 'filled' AND broker_order_id IS NOT NULL"
+    ),
 )
 
 # Engine-level immutability: block UPDATE and DELETE on the events table.
@@ -192,6 +198,37 @@ class SqliteExecutionLog:
                     event.detail,
                 ),
             )
+
+    def append_fill_if_new(self, event: ExecutionEvent) -> bool:
+        """Persist a FILLED event idempotently by ``broker_order_id``.
+
+        Returns ``True`` when the fill was newly inserted, or ``False`` if a
+        fill with the same ``broker_order_id`` was already recorded.
+        """
+        if event.kind is not ExecutionEventKind.FILLED:
+            raise ValueError("append_fill_if_new requires ExecutionEventKind.FILLED")
+        with self._conn, closing(self._conn.cursor()) as cur:
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO execution_events (
+                    cycle_id, recorded_at, kind, ticker, side, shares,
+                    reference_price, client_order_id, broker_order_id, detail
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.cycle_id,
+                    event.recorded_at.isoformat(),
+                    event.kind.value,
+                    event.ticker,
+                    event.side,
+                    event.shares,
+                    event.reference_price,
+                    event.client_order_id,
+                    event.broker_order_id,
+                    event.detail,
+                ),
+            )
+            return bool(cur.rowcount and cur.rowcount > 0)
 
     # -- reads ------------------------------------------------------------
 

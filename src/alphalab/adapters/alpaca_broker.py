@@ -44,6 +44,7 @@ from alphalab.domain.types import Side, Ticker
 __all__ = [
     "AccountSnapshot",
     "AlpacaBroker",
+    "BrokerFilledOrder",
     "BrokerOrder",
     "BrokerPosition",
     "MarketClock",
@@ -106,6 +107,19 @@ class BrokerOrder:
     shares: float
     client_order_id: str
     broker_order_id: str | None = None
+
+
+@dataclass(frozen=True)
+class BrokerFilledOrder:
+    """One filled order as reported by Alpaca."""
+
+    ticker: Ticker
+    side: Side
+    filled_qty: float
+    filled_avg_price: float
+    filled_at: datetime
+    client_order_id: str
+    broker_order_id: str
 
 
 @dataclass(frozen=True)
@@ -231,6 +245,47 @@ class AlpacaBroker:
                     broker_order_id=boid if isinstance(boid, str) else None,
                 )
             )
+        return tuple(out)
+
+    def filled_orders(self, *, limit: int = 100) -> tuple[BrokerFilledOrder, ...]:
+        """Fetch recent filled orders from ``/v2/orders?status=closed``."""
+        rows = self._get_list(f"/v2/orders?status=closed&limit={max(1, int(limit))}")
+        out: list[BrokerFilledOrder] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("status", "")).lower() != "filled":
+                continue
+            symbol = row.get("symbol")
+            side_raw = str(row.get("side", "")).lower()
+            boid = row.get("id")
+            if (
+                not isinstance(symbol, str)
+                or side_raw not in ("buy", "sell")
+                or not isinstance(boid, str)
+                or not boid
+            ):
+                continue
+            filled_qty = _as_float(row.get("filled_qty"))
+            filled_avg_price = _as_float(row.get("filled_avg_price"))
+            filled_at = _as_datetime(row.get("filled_at")) or _as_datetime(
+                row.get("updated_at")
+            )
+            if filled_qty <= 0.0 or filled_avg_price <= 0.0 or filled_at is None:
+                continue
+            coid = row.get("client_order_id")
+            out.append(
+                BrokerFilledOrder(
+                    ticker=Ticker(symbol),
+                    side=Side.BUY if side_raw == "buy" else Side.SELL,
+                    filled_qty=filled_qty,
+                    filled_avg_price=filled_avg_price,
+                    filled_at=filled_at,
+                    client_order_id=coid if isinstance(coid, str) else "",
+                    broker_order_id=boid,
+                )
+            )
+        out.sort(key=lambda o: o.filled_at)
         return tuple(out)
 
     def open_order_ids(self) -> frozenset[str]:

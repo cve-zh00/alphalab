@@ -33,6 +33,10 @@ from alphalab.adapters.alpaca_config import AlpacaSettings
 from alphalab.adapters.execution_log import SqliteExecutionLog
 from alphalab.adapters.journal_sqlite import SqliteJournal
 from alphalab.adapters.kill_switch import KillSwitch
+from alphalab.adapters.llm_verdict_cache import (
+    LlmVerdictCache,
+    compute_request_fingerprint,
+)
 from alphalab.adapters.prices import CsvPriceSeriesSource, PricePoint, PriceSeriesSource
 from alphalab.app.agentic_portfolio import DEFAULT_MAX_POSITIONS, ResearchFunction
 from alphalab.app.autopilot_preflight import run_preflight
@@ -63,6 +67,7 @@ from alphalab.cli.fixtures import build_fixture_request
 from alphalab.cli.ingest import load_live_builder, load_news_sentiment_fn
 from alphalab.cli.paper_transport import HttpxWriteTransport
 from alphalab.domain.backtest import PriceBar, ProportionalCostModel
+from alphalab.domain.compute.sectors import shrink_upside_empirical_bayes
 from alphalab.domain.contract.gate import conservative_c1b_upside
 from alphalab.domain.costs import CostSpec
 from alphalab.domain.execution import AutopilotGuardConfig
@@ -709,10 +714,11 @@ def _prescreen_for_llm(
     target_cap = max(0, cap)
     batch = fresh[:target_cap]
     if len(batch) < target_cap:
-        for t in pool:
+        rank_out_cap = max(target_cap, min(len(pool), 2 * max(1, target_cap)))
+        for rank_idx, t in enumerate(pool):
             if len(batch) >= target_cap:
                 break
-            if t not in batch:
+            if t not in batch and rank_idx < rank_out_cap:
                 batch.append(t)
     selected.extend(batch)
     return tuple(selected)
@@ -739,12 +745,12 @@ def _apply_sentiment_penalty(
 
 
 def _dispersion_adjusted_mos(art: EquityResearchArtifact) -> float:
-    """Compute dispersion-adjusted Margin of Safety ``upside / max(span, floor)``.
+    """Compute Empirical-Bayes dispersion-adjusted Margin of Safety.
 
-    Supports both exact point targets (``not art.valuation_withheld``) and
-    unanimous multi-method C1b ranges via ``conservative_c1b_upside(art)``.
-    Single-method valuations receive a dispersion floor of ``1.0`` so
-    multi-method corroborated stocks rank ahead of single-method C6 names.
+    Applies Smith & Winkler (2006) Empirical Bayes shrinkage toward the cross-
+    sectional prior before dividing by dispersion ``max(span, floor)``. Supports
+    both exact point targets (``not art.valuation_withheld``) and unanimous
+    multi-method C1b ranges via ``conservative_c1b_upside(art)``.
     """
     if art.current_price <= 0.0:
         return -1e9
@@ -759,6 +765,15 @@ def _dispersion_adjusted_mos(art: EquityResearchArtifact) -> float:
         return -1e9
     raw_span = art.consensus_relative_span if art.consensus_relative_span is not None else 0.15
     span_floor = 0.15 if len(art.methods_used) >= 2 else 1.0
+    if upside > 1.0:
+        upside = 1.0 + max(
+            0.0,
+            shrink_upside_empirical_bayes(
+                upside - 1.0,
+                relative_span=raw_span,
+                methods_count=len(art.methods_used),
+            ),
+        )
     return upside / max(raw_span, span_floor)
 
 
@@ -769,6 +784,19 @@ def _make_research_fn(
     err: TextIO | None = None,
 ) -> ResearchFunction:
     live_builder = load_live_builder(price_source=price_source) if opts.source == "live" else None
+    verdict_cache: LlmVerdictCache | None = None
+    llm_version = ""
+    if opts.use_llm and opts.source == "live":
+        from alphalab.adapters.llm_config import LLMSettings
+
+        settings = LLMSettings()
+        llm_version = (
+            f"{settings.quick_version}+{settings.deep_version}"
+            if opts.debate
+            else settings.deep_version
+        )
+        cache_path = Path(opts.execution_db).parent / "llm_verdict_cache.json"
+        verdict_cache = LlmVerdictCache(cache_path)
 
     def _research(ticker: Ticker) -> EquityResearchArtifact | None:
         effective_as_of = (
@@ -785,7 +813,19 @@ def _make_research_fn(
                 request = build_fixture_request(
                     str(ticker), knowledge_date=effective_as_of
                 ).request
-            artifact = _run_pipeline(request, use_llm=opts.use_llm, debate=opts.debate)
+            fp: str | None = None
+            cached: EquityResearchArtifact | None = None
+            if verdict_cache is not None:
+                fp = compute_request_fingerprint(
+                    request, llm_version=llm_version, debate=opts.debate
+                )
+                cached = verdict_cache.get(fp)
+            if cached is not None:
+                artifact = cached
+            else:
+                artifact = _run_pipeline(request, use_llm=opts.use_llm, debate=opts.debate)
+                if verdict_cache is not None and fp is not None:
+                    verdict_cache.put(fp, artifact)
             if opts.assume_verdict is not None and not opts.use_llm:
                 artifact = artifact.model_copy(update={"verdict": opts.assume_verdict})
         except Exception:
@@ -793,7 +833,8 @@ def _make_research_fn(
                 print(" FAILED", file=err, flush=True)
             raise
         if opts.use_llm and not opts.as_json and err is not None:
-            print(f" -> {artifact.verdict.value}", file=err, flush=True)
+            suffix = " (cached)" if cached is not None else ""
+            print(f" -> {artifact.verdict.value}{suffix}", file=err, flush=True)
         return artifact
 
     return _research
@@ -806,6 +847,7 @@ def _make_forecast_recorder(
     abstentions: SqliteAbstentionStore,
 ) -> ForecastRecorder:
     llm_version: str | None = "deterministic-template"
+    llm_cutoff: date | None = None
     if opts.use_llm:
         from alphalab.adapters.llm_config import LLMSettings
 
@@ -814,6 +856,11 @@ def _make_forecast_recorder(
             f"{settings.quick_version}+{settings.deep_version}"
             if opts.debate
             else settings.deep_version
+        )
+        llm_cutoff = (
+            max(settings.quick_cutoff, settings.deep_cutoff)
+            if opts.debate
+            else settings.deep_cutoff
         )
 
     def _record(artifact: EquityResearchArtifact, as_of: date) -> Prediction | Abstention | None:
@@ -836,6 +883,7 @@ def _make_forecast_recorder(
                 journal=journal,
                 abstentions=abstentions,
                 llm_version=llm_version,
+                llm_cutoff=llm_cutoff,
             )
         except Exception:
             return None

@@ -17,6 +17,18 @@ from enum import StrEnum
 
 import numpy as np
 
+__all__ = [
+    "SECTOR_PROFILES",
+    "TICKER_TO_SECTOR",
+    "GicsSector",
+    "SectorProfile",
+    "compute_capm_cost_of_equity",
+    "compute_rolling_beta",
+    "estimate_beta_from_prices",
+    "resolve_sector_profile",
+    "shrink_upside_empirical_bayes",
+]
+
 
 class GicsSector(StrEnum):
     """Canonical GICS sector classification."""
@@ -236,13 +248,14 @@ def estimate_beta_from_prices(
     min_observations: int = 30,
     lookback: int = 252,
 ) -> float:
-    """Estimate Blume-shrunk equity beta from trailing daily closes.
+    """Estimate Vasicek-shrunk equity beta from trailing daily closes.
 
     When ``benchmark_closes`` is supplied with at least ``min_observations``
     overlapping returns, computes OLS beta ``Cov(r_i, r_m) / Var(r_m)`` and
-    applies Blume shrinkage ``0.67 * beta_ols + 0.33 * 1.0``. When no
-    benchmark is available, blends ``default_beta`` with the asset's annualized
-    volatility relative to a 16% market baseline. Clamped to ``[0.45, 2.10]``.
+    applies Vasicek (1973) precision-weighted Bayesian shrinkage toward the
+    GICS sector prior ``default_beta``. When no benchmark is available, blends
+    ``default_beta`` with the asset's annualized volatility relative to a 16%
+    market baseline. Clamped to ``[0.45, 2.10]``.
     """
     arr = np.asarray(asset_closes[-lookback - 1 :], dtype=float)
     arr = arr[np.isfinite(arr) & (arr > 0.0)]
@@ -261,13 +274,44 @@ def estimate_beta_from_prices(
             if var_m > 1e-10:
                 cov_im = float(np.cov(a_ret, bench_ret, ddof=1)[0, 1])
                 raw_beta = cov_im / var_m
-                shrunk = 0.67 * raw_beta + 0.33 * 1.0
+                var_i = float(np.var(a_ret, ddof=1))
+                resid_var = max(0.0, var_i - (raw_beta**2) * var_m)
+                s_beta_sq = resid_var / (max(1, n - 2) * var_m)
+                tau_sector_sq = 0.09
+                w_ols = tau_sector_sq / (tau_sector_sq + s_beta_sq)
+                prior_beta = float(np.clip(default_beta, 0.45, 2.10))
+                shrunk = w_ols * raw_beta + (1.0 - w_ols) * prior_beta
                 return float(np.clip(shrunk, 0.45, 2.10))
 
     ann_vol = float(np.std(asset_ret, ddof=1)) * math.sqrt(252.0)
     vol_beta = ann_vol / 0.16
     blended = 0.60 * default_beta + 0.40 * vol_beta
     return float(np.clip(blended, 0.45, 2.10))
+
+
+compute_rolling_beta = estimate_beta_from_prices
+
+
+def shrink_upside_empirical_bayes(
+    upside: float,
+    *,
+    relative_span: float | None = None,
+    methods_count: int = 2,
+    prior_mean: float = 0.10,
+    prior_std: float = 0.25,
+) -> float:
+    """Apply Smith & Winkler (2006) Empirical Bayes shrinkage to raw upside.
+
+    Dampens extreme valuation outliers (Optimizer's Curse) proportionally to
+    cross-method dispersion and single-method uncertainty.
+    """
+    if upside <= 0.0:
+        return upside
+    span = max(float(relative_span) if relative_span is not None else 0.15, 0.15)
+    obs_var = (0.5 * span) ** 2 + (0.25**2 if methods_count < 2 else 0.0)
+    prior_var = max(1e-6, prior_std**2)
+    shrinkage = prior_var / (prior_var + obs_var)
+    return float(prior_mean + shrinkage * (upside - prior_mean))
 
 
 def compute_capm_cost_of_equity(

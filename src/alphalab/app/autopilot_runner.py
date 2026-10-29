@@ -235,6 +235,7 @@ class AutopilotRunner:
         open_orders = (
             self._broker.open_orders() if hasattr(self._broker, "open_orders") else ()
         )
+        self._sync_broker_fills(cycle_id=cycle_id)
         decision_date = _resolve_session_date(as_of, clock, stamp)
 
         settled_count = self._settlement_runner(decision_date) if self._settlement_runner else 0
@@ -273,6 +274,11 @@ class AutopilotRunner:
         if self._intraday_highs is not None and positions:
             with contextlib.suppress(Exception):
                 live_highs = self._intraday_highs(tuple(positions))
+        fair_upsides = {
+            o.ticker: o.upside * 100.0
+            for o in agentic_plan.outcomes
+            if o.upside is not None
+        }
         pos_risks = _build_position_risks(
             positions,
             bars,
@@ -281,6 +287,7 @@ class AutopilotRunner:
             intraday_highs=live_highs,
             peak_memory=self._peak_prices,
             volatilities=volatilities,
+            fair_value_upsides=fair_upsides,
         )
         verdict_map: dict[Ticker, Verdict | None] = {
             o.ticker: o.verdict for o in agentic_plan.outcomes
@@ -420,6 +427,39 @@ class AutopilotRunner:
                     else ()
                 )
         return clock, account, raw_positions, open_orders
+
+    def _sync_broker_fills(self, *, cycle_id: str) -> int:
+        """Idempotently record newly filled broker orders in the execution log."""
+        filled_fn = getattr(self._broker, "filled_orders", None)
+        if not callable(filled_fn):
+            return 0
+        try:
+            fills = filled_fn()
+        except Exception:
+            return 0
+        append_fill = getattr(self._log, "append_fill_if_new", None)
+        inserted = 0
+        for fill in fills:
+            event = ExecutionEvent(
+                cycle_id=cycle_id,
+                recorded_at=fill.filled_at,
+                kind=ExecutionEventKind.FILLED,
+                ticker=str(fill.ticker),
+                side=fill.side.value,
+                shares=fill.filled_qty,
+                reference_price=fill.filled_avg_price,
+                client_order_id=fill.client_order_id,
+                broker_order_id=fill.broker_order_id,
+                detail="broker fill synced",
+            )
+            with contextlib.suppress(Exception):
+                if callable(append_fill):
+                    if append_fill(event):
+                        inserted += 1
+                else:
+                    self._log.append(event)
+                    inserted += 1
+        return inserted
 
     def _next_sleep_seconds(self, interval_seconds: float, was_market_open: bool) -> float:
         base_wait = max(0.0, interval_seconds)
@@ -702,7 +742,10 @@ def _avg_correlations_60d(
 def _recent_sell_dates(log: SqliteExecutionLog) -> dict[Ticker, date]:
     sells: dict[Ticker, date] = {}
     for event in log:
-        if event.kind is ExecutionEventKind.SUBMITTED and event.side == "sell":
+        if (
+            event.kind in (ExecutionEventKind.FILLED, ExecutionEventKind.SUBMITTED)
+            and event.side == "sell"
+        ):
             ticker = Ticker(event.ticker)
             seen = event.recorded_at.date()
             if ticker not in sells or seen > sells[ticker]:
@@ -719,11 +762,14 @@ def _build_position_risks(
     intraday_highs: Mapping[Ticker, float] | None = None,
     peak_memory: dict[tuple[Ticker, date], float] | None = None,
     volatilities: Mapping[Ticker, float] | None = None,
+    fair_value_upsides: Mapping[Ticker, float] | None = None,
 ) -> dict[Ticker, PositionRiskSnapshot]:
-    entries = _latest_entries(log)
+    held_shares = {t: p.shares for t, p in positions.items() if p.shares > 0.0}
+    entries = _latest_entries(log, held_shares=held_shares)
     out: dict[Ticker, PositionRiskSnapshot] = {}
     highs = intraday_highs or {}
     vols = volatilities or {}
+    upsides = fair_value_upsides or {}
     for ticker, pos in positions.items():
         if pos.shares <= 0.0 or pos.price <= 0.0:
             continue
@@ -735,9 +781,11 @@ def _build_position_risks(
         )
         series = bars.get(ticker, ())
         since_entry = [
-            max(b.close, b.high or b.close) for b in series if entry_date <= b.on <= as_of
+            max(b.close, b.high or b.close)
+            for b in series
+            if entry_date <= b.on <= as_of
         ]
-        live_high = highs.get(ticker, 0.0)
+        live_high = highs.get(ticker, 0.0) if as_of > entry_date else 0.0
         remembered = peak_memory.get((ticker, entry_date), 0.0) if peak_memory is not None else 0.0
         peak = max([entry_price, pos.price, live_high, remembered, *since_entry])
         if peak_memory is not None:
@@ -749,33 +797,68 @@ def _build_position_risks(
             current_price=pos.price,
             peak_price=peak,
             annualized_volatility=vols.get(ticker),
+            fair_value_upside_pct=upsides.get(ticker),
         )
     return out
 
 
-def _latest_entries(log: SqliteExecutionLog) -> dict[Ticker, tuple[date, float]]:
+def _latest_entries(
+    log: SqliteExecutionLog,
+    *,
+    held_shares: Mapping[Ticker, float] | None = None,
+) -> dict[Ticker, tuple[date, float]]:
     """Entry (date, price) of the first still-open buy per ticker.
 
-    Net shares are tracked from SUBMITTED events; partial sells keep the
-    original entry, and the entry is dropped only once the position is flat.
+    Prefers ``FILLED`` events for any ticker that has recorded fills, falling
+    back to ``SUBMITTED`` events when no ``FILLED`` rows exist for that ticker.
+    When ``held_shares`` is provided from the live broker, walks backwards over
+    buy events after the last flat point until cumulative bought shares cover
+    ``held_shares[ticker]``, preventing stale/canceled historical submissions
+    from backdating a fresh entry.
     """
+    events = list(log)
+    tickers_with_fills = {
+        Ticker(e.ticker) for e in events if e.kind is ExecutionEventKind.FILLED
+    }
     entries: dict[Ticker, tuple[date, float]] = {}
     net: dict[Ticker, float] = {}
-    for event in log:
-        if event.kind is not ExecutionEventKind.SUBMITTED:
-            continue
+    open_buys: dict[Ticker, list[tuple[date, float, float]]] = {}
+    for event in events:
         ticker = Ticker(event.ticker)
+        target_kind = (
+            ExecutionEventKind.FILLED
+            if ticker in tickers_with_fills
+            else ExecutionEventKind.SUBMITTED
+        )
+        if event.kind is not target_kind:
+            continue
         shares = event.shares or 0.0
         if event.side == "buy" and event.reference_price and event.reference_price > 0.0:
             if net.get(ticker, 0.0) <= 1e-6:
                 entries[ticker] = (event.recorded_at.date(), event.reference_price)
                 net[ticker] = 0.0
+                open_buys[ticker] = []
             net[ticker] += shares
+            open_buys.setdefault(ticker, []).append(
+                (event.recorded_at.date(), event.reference_price, shares)
+            )
         elif event.side == "sell":
             net[ticker] = net.get(ticker, 0.0) - shares
             if net[ticker] <= 1e-6:
                 entries.pop(ticker, None)
+                open_buys.pop(ticker, None)
                 net[ticker] = 0.0
+    if held_shares:
+        for ticker, target_qty in held_shares.items():
+            lots = open_buys.get(ticker)
+            if not lots or target_qty <= 0.0:
+                continue
+            acc = 0.0
+            for lot_date, lot_price, lot_shares in reversed(lots):
+                entries[ticker] = (lot_date, lot_price)
+                acc += lot_shares
+                if acc >= target_qty * 0.99:
+                    break
     return entries
 
 

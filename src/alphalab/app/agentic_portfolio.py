@@ -37,7 +37,10 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from alphalab.artifact import EquityResearchArtifact, Verdict
-from alphalab.domain.compute.sectors import resolve_sector_profile
+from alphalab.domain.compute.sectors import (
+    resolve_sector_profile,
+    shrink_upside_empirical_bayes,
+)
 from alphalab.domain.contract.gate import conservative_c1b_upside
 from alphalab.domain.types import Ticker
 
@@ -303,7 +306,11 @@ def conviction_volatility_targets(
             conviction = 0.75 if (outcome and "withheld" in outcome.detail) else 1.0
         else:
             span = max(outcome.relative_span or 0.15, 0.15)
-            mos_ratio = min(max(0.0, outcome.upside) / span, 2.0)
+            shrunk_upside = shrink_upside_empirical_bayes(
+                outcome.upside,
+                relative_span=outcome.relative_span,
+            )
+            mos_ratio = min(max(0.0, shrunk_upside) / span, 2.0)
             conviction = 1.0 + 0.5 * mos_ratio
         raw_vol = volatilities.get(ticker, 0.25) if volatilities is not None else 0.25
         sigma = max(0.10, min(0.80, raw_vol if raw_vol > 0.0 else 0.25))

@@ -60,6 +60,7 @@ __all__ = [
     "PositionRiskSnapshot",
     "apply_nofx_guards",
     "effective_stop_loss_pct",
+    "project_feasible_weights_dykstra",
     "should_drawdown_close",
 ]
 
@@ -102,6 +103,7 @@ class PositionRiskSnapshot(BaseModel):
     current_price: float = Field(gt=0.0)
     peak_price: float = Field(gt=0.0)
     annualized_volatility: float | None = Field(default=None, ge=0.0)
+    fair_value_upside_pct: float | None = Field(default=None)
 
     @property
     def effective_peak_price(self) -> float:
@@ -187,6 +189,24 @@ def effective_stop_loss_pct(
     return max(low_bound, min(high_bound, raw_stop))
 
 
+def _effective_drawdown_thresholds(
+    snapshot: PositionRiskSnapshot,
+    config: AutopilotGuardConfig | None = None,
+) -> tuple[float, float]:
+    """Return ``(arm_pct, giveback_pct)`` after Ornstein-Uhlenbeck convergence scaling."""
+    rules = config or AutopilotGuardConfig()
+    arm_pct = rules.drawdown_arm_gain_pct
+    giveback_pct = rules.drawdown_giveback_pct
+    upside = snapshot.fair_value_upside_pct
+    if upside is not None:
+        if upside <= 2.0:
+            arm_pct = min(arm_pct, 3.0)
+            giveback_pct = min(giveback_pct, 30.0)
+        elif upside >= 25.0:
+            arm_pct = max(arm_pct, min(10.0, 0.25 * upside))
+    return arm_pct, giveback_pct
+
+
 def should_drawdown_close(
     snapshot: PositionRiskSnapshot,
     config: AutopilotGuardConfig | None = None,
@@ -196,12 +216,13 @@ def should_drawdown_close(
     Mirrors NOFX's ``shouldDrawdownClose``: the monitor arms only once the
     position's peak price gain reaches ``drawdown_arm_gain_pct`` (+5%), and
     triggers when at least ``drawdown_giveback_pct`` (40%) of that peak gain has
-    been given back.
+    been given back. When ``fair_value_upside_pct`` is available, thresholds
+    scale by Ornstein-Uhlenbeck convergence distance (Leung & Li 2015).
     """
-    rules = config or AutopilotGuardConfig()
+    arm_pct, giveback_pct = _effective_drawdown_thresholds(snapshot, config)
     return (
-        snapshot.peak_pnl_pct >= rules.drawdown_arm_gain_pct
-        and snapshot.profit_giveback_pct >= rules.drawdown_giveback_pct
+        snapshot.peak_pnl_pct >= arm_pct
+        and snapshot.profit_giveback_pct >= giveback_pct
     )
 
 
@@ -260,16 +281,16 @@ def apply_nofx_guards(
         surviving=surviving,
         actions=actions,
     )
+    capped = _enforce_slot_ceiling(surviving, positions=positions, max_positions=max_positions)
     if sectors is not None:
         _enforce_sector_cap(
-            surviving,
+            capped,
             positions=positions,
             current_weights=current_weights,
             sectors=sectors,
             cap=max_sector_weight,
             actions=actions,
         )
-    capped = _enforce_slot_ceiling(surviving, positions=positions, max_positions=max_positions)
     capped = _enforce_cash_headroom(capped, positions=positions)
     reason = safe_mode_reason or "model evaluation coverage below minimum threshold"
     return GuardedTargets(
@@ -377,13 +398,14 @@ def _protective_exit_for(
             ),
         )
     if should_drawdown_close(pos, rules):
+        _, giveback_pct = _effective_drawdown_thresholds(pos, rules)
         return GuardAction(
             ticker=pos.ticker,
             kind=GuardActionKind.DRAWDOWN_EXIT,
             reason=(
                 f"peak-profit drawdown triggered: peak {pos.peak_pnl_pct:+.2f}%, "
                 f"current {pos.price_pnl_pct:+.2f}%, giveback {pos.profit_giveback_pct:.1f}% "
-                f">= {rules.drawdown_giveback_pct:.1f}%"
+                f">= {giveback_pct:.1f}%"
             ),
         )
     if rules.exit_on_sell_verdict and verdict is Verdict.SELL:
@@ -479,18 +501,48 @@ def _enforce_sector_cap(
     order until headroom runs out (the last one is scaled to fit).
     """
     used: dict[str, float] = {}
-    for t, w in surviving.items():
+    for t in positions:
         sector = sectors.get(t)
-        if sector and t in positions:
-            held_w = max(w, (current_weights or {}).get(t, 0.0))
-            used[sector] = used.get(sector, 0.0) + held_w
-    for t, held_w in (current_weights or {}).items():
-        sector = sectors.get(t)
-        if sector and t in positions and t not in surviving:
-            used[sector] = used.get(sector, 0.0) + held_w
+        if not sector:
+            continue
+        if current_weights is not None and t in current_weights:
+            used[sector] = used.get(sector, 0.0) + current_weights[t]
+        elif t in surviving:
+            used[sector] = used.get(sector, 0.0) + surviving[t]
     for t in sorted(surviving):
         sector = sectors.get(t)
-        if not sector or t in positions:
+        if not sector or t not in positions:
+            continue
+        if current_weights is None or t not in current_weights:
+            continue
+        held_w = current_weights[t]
+        delta = surviving[t] - held_w
+        if delta <= 1e-12:
+            continue
+        room = max(0.0, cap - used.get(sector, 0.0))
+        if delta <= room + 1e-12:
+            used[sector] = used.get(sector, 0.0) + delta
+        else:
+            new_w = held_w + room
+            surviving[t] = new_w
+            used[sector] = used.get(sector, 0.0) + room
+            actions.append(
+                GuardAction(
+                    ticker=t,
+                    kind=GuardActionKind.SECTOR_CAP_BLOCKED,
+                    reason=(
+                        f"sector cap: {sector} limited to {cap:.0%}; "
+                        f"top-up capped at {new_w:.2%}"
+                    ),
+                )
+            )
+    new_entries = sorted(
+        (t for t in surviving if t not in positions),
+        key=lambda t: (-surviving[t], str(t)),
+    )
+    for t in new_entries:
+        sector = sectors.get(t)
+        if not sector:
             continue
         weight = surviving[t]
         room = cap - used.get(sector, 0.0)
@@ -527,13 +579,136 @@ def _enforce_slot_ceiling(
     positions: Mapping[Ticker, PositionRiskSnapshot],
     max_positions: int,
 ) -> dict[Ticker, float]:
-    """Keep at most ``max_positions`` names, prioritizing existing holdings first."""
+    """Keep at most ``max_positions`` names, prioritizing existing holdings and conviction."""
     if len(surviving) <= max_positions:
-        return dict(surviving)
-    held_first = sorted(surviving, key=lambda t: (t not in positions, str(t)))
-    kept = held_first[:max_positions]
-    weight = 1.0 / max_positions
-    return {t: weight for t in sorted(kept)}
+        out = dict(surviving)
+    else:
+        held_first = sorted(
+            surviving,
+            key=lambda t: (t not in positions, -surviving[t], str(t)),
+        )
+        kept = held_first[:max_positions]
+        out = {t: surviving[t] for t in sorted(kept)}
+    total = sum(out.values())
+    if not positions and total > 1.0 + 1e-9:
+        out = {t: w / total for t, w in out.items()}
+    return out
+
+
+def _project_simplex_ball(values: list[float], cap: float) -> list[float]:
+    """Euclidean projection of ``values`` onto ``{x >= 0 : sum(x) <= cap}``."""
+    non_neg = [max(0.0, v) for v in values]
+    if cap <= 0.0 or not non_neg:
+        return [0.0 for _ in values]
+    if sum(non_neg) <= cap + 1e-12:
+        return non_neg
+    u = sorted(values, reverse=True)
+    cumsum = 0.0
+    rho = 0
+    theta = 0.0
+    for j, val in enumerate(u, start=1):
+        cumsum += val
+        candidate = (cumsum - cap) / j
+        if val - candidate > 0.0:
+            rho = j
+            theta = candidate
+    if rho == 0:
+        return [0.0 for _ in values]
+    return [max(0.0, v - theta) for v in values]
+
+
+def project_feasible_weights_dykstra(
+    weights: Mapping[Ticker, float],
+    *,
+    max_position_weight: float = 0.10,
+    sectors: Mapping[Ticker, str] | None = None,
+    max_sector_weight: float = 0.25,
+    max_gross_exposure: float = 1.0,
+    locked_tickers: frozenset[Ticker] = frozenset(),
+    iterations: int = 20,
+) -> dict[Ticker, float]:
+    """Project target weights onto box, sector, and gross constraints via Dykstra (1983)."""
+    if max_position_weight <= 0.0:
+        raise ValueError("max_position_weight must be positive")
+    if max_sector_weight <= 0.0:
+        raise ValueError("max_sector_weight must be positive")
+    if max_gross_exposure <= 0.0:
+        raise ValueError("max_gross_exposure must be positive")
+    if iterations < 1:
+        raise ValueError("iterations must be >= 1")
+    if not weights:
+        return {}
+
+    tickers = sorted(weights)
+    n = len(tickers)
+    locked_mask = [t in locked_tickers for t in tickers]
+    x0 = [float(weights[t]) for t in tickers]
+    x = list(x0)
+
+    p_box = [0.0] * n
+    p_sec = [0.0] * n
+    p_gross = [0.0] * n
+
+    sector_groups: dict[str, list[int]] = {}
+    if sectors is not None:
+        for idx, t in enumerate(tickers):
+            sec = sectors.get(t)
+            if sec:
+                sector_groups.setdefault(sec, []).append(idx)
+
+    unlocked_indices = [i for i in range(n) if not locked_mask[i]]
+
+    def _proj_box(vec: list[float]) -> list[float]:
+        out = [0.0] * n
+        for i, val in enumerate(vec):
+            if locked_mask[i]:
+                out[i] = max(0.0, x0[i])
+            else:
+                out[i] = min(max(0.0, val), max_position_weight)
+        return out
+
+    def _proj_sector(vec: list[float]) -> list[float]:
+        if not sector_groups:
+            return list(vec)
+        out = list(vec)
+        for indices in sector_groups.values():
+            locked_sum = sum(max(0.0, out[i]) for i in indices if locked_mask[i])
+            unlocked_sec = [i for i in indices if not locked_mask[i]]
+            if not unlocked_sec:
+                continue
+            rem_cap = max(0.0, max_sector_weight - locked_sum)
+            proj_vals = _project_simplex_ball([out[i] for i in unlocked_sec], rem_cap)
+            for i, pv in zip(unlocked_sec, proj_vals, strict=True):
+                out[i] = pv
+        return out
+
+    def _proj_gross(vec: list[float]) -> list[float]:
+        if not unlocked_indices:
+            return list(vec)
+        out = list(vec)
+        locked_sum = sum(max(0.0, out[i]) for i in range(n) if locked_mask[i])
+        rem_cap = max(0.0, max_gross_exposure - locked_sum)
+        proj_vals = _project_simplex_ball([out[i] for i in unlocked_indices], rem_cap)
+        for i, pv in zip(unlocked_indices, proj_vals, strict=True):
+            out[i] = pv
+        return out
+
+    for _ in range(iterations):
+        y_box = [x[i] + p_box[i] for i in range(n)]
+        x = _proj_box(y_box)
+        p_box = [y_box[i] - x[i] for i in range(n)]
+
+        y_sec = [x[i] + p_sec[i] for i in range(n)]
+        x = _proj_sector(y_sec)
+        p_sec = [y_sec[i] - x[i] for i in range(n)]
+
+        y_gross = [x[i] + p_gross[i] for i in range(n)]
+        x = _proj_gross(y_gross)
+        p_gross = [y_gross[i] - x[i] for i in range(n)]
+
+    # Final feasibility pass ensures exact satisfaction of all constraints.
+    x = _proj_gross(_proj_sector(_proj_box(x)))
+    return {t: w for t, w in zip(tickers, x, strict=True) if w > 1e-6}
 
 
 def _enforce_cash_headroom(
