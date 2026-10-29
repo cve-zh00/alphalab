@@ -77,6 +77,11 @@ from alphalab.app.paper_runner import (
 )
 from alphalab.artifact import EquityResearchArtifact, Verdict
 from alphalab.domain.backtest import PriceBar, SignalContext, liquidity_screened
+from alphalab.domain.compute.sectors import (
+    SPY_SECTOR_WEIGHTS,
+    estimate_beta_from_prices,
+    estimate_welch_beta,
+)
 from alphalab.domain.execution import (
     AutopilotGuardConfig,
     GuardAction,
@@ -97,6 +102,7 @@ __all__ = [
     "AutopilotCycleResult",
     "AutopilotRunner",
     "CandidateSelector",
+    "ExposureReport",
     "ForecastRecorder",
     "IntradayHighsProvider",
     "RuntimeHealth",
@@ -132,6 +138,19 @@ class RuntimeHealth:
 
 
 @dataclass(frozen=True)
+class ExposureReport:
+    """Active benchmark exposure and beta diagnostics vs SPY per cycle."""
+
+    beta_ols: float
+    beta_welch: float
+    active_beta_vs_spy: float
+    ex_ante_tracking_error: float
+    sector_weights: Mapping[str, float]
+    active_sector_gaps_vs_spy: Mapping[str, float]
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class AutopilotCycleResult:
     """Complete output of one autonomous agentic cycle."""
 
@@ -143,6 +162,7 @@ class AutopilotCycleResult:
     predictions_registered: int = 0
     abstentions_registered: int = 0
     settled_predictions: int = 0
+    exposure: ExposureReport | None = None
 
 
 def select_liquid_candidates(
@@ -232,52 +252,41 @@ class AutopilotRunner:
         account = self._broker.account()
         raw_positions = self._broker.positions()
         clock = self._broker.clock()
-        open_orders = (
-            self._broker.open_orders() if hasattr(self._broker, "open_orders") else ()
-        )
+        open_orders = self._broker.open_orders() if hasattr(self._broker, "open_orders") else ()
         self._sync_broker_fills(cycle_id=cycle_id)
         decision_date = _resolve_session_date(as_of, clock, stamp)
 
         settled_count = self._settlement_runner(decision_date) if self._settlement_runner else 0
-        bars = self._prices.recent_bars()
+        if submit and self._require_market_open and not clock.is_open:
+            clock, account, raw_positions, open_orders = self._await_or_refresh_open(
+                clock, account, raw_positions, open_orders
+            )
+            decision_date = _resolve_session_date(as_of, clock, stamp)
+
+        raw_bars = self._prices.recent_bars()
         latest_prices = {
-            **_latest_prices(bars),
+            **_latest_prices(raw_bars),
             **{t: pos.price for t, pos in raw_positions.items() if pos.price > 0.0},
         }
-        positions = _reconcile_positions_with_open_orders(
-            raw_positions, open_orders, latest_prices
-        )
+        bars = _overlay_live_bars(raw_bars, latest_prices, decision_date)
+        positions = _reconcile_positions_with_open_orders(raw_positions, open_orders, latest_prices)
         volatilities = _volatilities_60d(bars, decision_date)
+        sizing_volatilities = _residual_volatilities_60d(bars, decision_date)
 
         candidates = self._choose_candidates(decision_date, bars, tuple(positions))
         agentic_plan, preds, absts = self._evaluate_candidates(
             decision_date,
             candidates,
-            volatilities=volatilities,
+            volatilities=sizing_volatilities,
             correlations=_avg_correlations_60d(bars, decision_date, candidates),
         )
-
-        if submit and self._require_market_open and not clock.is_open:
-            clock, account, raw_positions, open_orders = self._await_or_refresh_open(
-                clock, account, raw_positions, open_orders
-            )
-            if clock.is_open:
-                latest_prices = {
-                    **_latest_prices(bars),
-                    **{t: pos.price for t, pos in raw_positions.items() if pos.price > 0.0},
-                }
-                positions = _reconcile_positions_with_open_orders(
-                    raw_positions, open_orders, latest_prices
-                )
 
         live_highs: Mapping[Ticker, float] = {}
         if self._intraday_highs is not None and positions:
             with contextlib.suppress(Exception):
                 live_highs = self._intraday_highs(tuple(positions))
         fair_upsides = {
-            o.ticker: o.upside * 100.0
-            for o in agentic_plan.outcomes
-            if o.upside is not None
+            o.ticker: o.upside * 100.0 for o in agentic_plan.outcomes if o.upside is not None
         }
         pos_risks = _build_position_risks(
             positions,
@@ -293,9 +302,9 @@ class AutopilotRunner:
             o.ticker: o.verdict for o in agentic_plan.outcomes
         }
         equity = max(account.equity, 1e-9)
-        current_weights = {
-            t: (pos.shares * pos.price) / equity for t, pos in positions.items()
-        }
+        current_weights = {t: (pos.shares * pos.price) / equity for t, pos in positions.items()}
+        resolved_sectors = resolve_sectors(sorted({*agentic_plan.targets, *positions}), None)
+        spy_bench_sectors = {s.value: w for s, w in SPY_SECTOR_WEIGHTS.items()}
         guarded = apply_nofx_guards(
             as_of=decision_date,
             proposed_targets=agentic_plan.targets,
@@ -308,9 +317,8 @@ class AutopilotRunner:
             safe_mode_reason=None if agentic_plan.actionable else agentic_plan.note,
             max_positions=self._max_positions,
             config=self._guard_config,
-            sectors=resolve_sectors(
-                sorted({*agentic_plan.targets, *positions}), None
-            ),
+            sectors=resolved_sectors,
+            benchmark_sector_weights=spy_bench_sectors,
         )
         if not self._require_market_open or clock.is_open:
             _update_sell_streaks(self._sell_streaks, positions, verdict_map, guarded.actions)
@@ -332,6 +340,12 @@ class AutopilotRunner:
             market_open=clock.is_open,
             open_orders=open_orders,
             submit=submit,
+        )
+        exposure = _build_exposure_report(
+            targets=guarded.targets,
+            bars=bars,
+            as_of=decision_date,
+            sectors=resolved_sectors,
         )
         cycle = CycleResult(
             cycle_id=cycle_id,
@@ -356,6 +370,7 @@ class AutopilotRunner:
             predictions_registered=preds,
             abstentions_registered=absts,
             settled_predictions=settled_count,
+            exposure=exposure,
         )
 
     def run_loop(
@@ -409,11 +424,7 @@ class AutopilotRunner:
     ]:
         with contextlib.suppress(Exception):
             clock = self._broker.clock()
-            if (
-                not clock.is_open
-                and clock.next_open is not None
-                and clock.timestamp is not None
-            ):
+            if not clock.is_open and clock.next_open is not None and clock.timestamp is not None:
                 rem = (clock.next_open - clock.timestamp).total_seconds()
                 if 0.0 < rem <= 300.0:
                     time.sleep(rem + 15.0)
@@ -422,9 +433,7 @@ class AutopilotRunner:
                 account = self._broker.account()
                 raw_positions = self._broker.positions()
                 open_orders = (
-                    self._broker.open_orders()
-                    if hasattr(self._broker, "open_orders")
-                    else ()
+                    self._broker.open_orders() if hasattr(self._broker, "open_orders") else ()
                 )
         return clock, account, raw_positions, open_orders
 
@@ -688,6 +697,44 @@ def _intent_detail(
     return f"verdict={verdict_label} (nofx_agentic)"
 
 
+def _overlay_live_bars(
+    bars: Mapping[Ticker, Sequence[PriceBar]],
+    latest_prices: Mapping[Ticker, float],
+    as_of: date,
+) -> dict[Ticker, Sequence[PriceBar]]:
+    """Overlay live post-open prices onto ``bars`` so research and cache see ``P_open``."""
+    out: dict[Ticker, Sequence[PriceBar]] = dict(bars)
+    for ticker, live_px in latest_prices.items():
+        if not math.isfinite(live_px) or live_px <= 0.0:
+            continue
+        series = list(bars.get(ticker, ()))
+        if not series:
+            out[ticker] = (PriceBar(on=as_of, close=live_px, raw_close=live_px),)
+            continue
+        last = series[-1]
+        if last.on < as_of:
+            series.append(
+                PriceBar(
+                    on=as_of,
+                    close=live_px,
+                    raw_close=live_px,
+                    volume=last.volume,
+                )
+            )
+            out[ticker] = tuple(series)
+        elif last.on == as_of and abs(last.close - live_px) > 1e-6:
+            series[-1] = PriceBar(
+                on=as_of,
+                close=live_px,
+                raw_close=live_px,
+                volume=last.volume,
+                high=max(last.high or live_px, live_px),
+                low=min(last.low or live_px, live_px),
+            )
+            out[ticker] = tuple(series)
+    return out
+
+
 def _volatilities_60d(
     bars: Mapping[Ticker, Sequence[PriceBar]], as_of: date
 ) -> dict[Ticker, float]:
@@ -701,6 +748,119 @@ def _volatilities_60d(
         if len(rets) >= 2:
             out[ticker] = statistics.stdev(rets) * math.sqrt(252.0)
     return out
+
+
+def _residual_volatilities_60d(
+    bars: Mapping[Ticker, Sequence[PriceBar]], as_of: date
+) -> dict[Ticker, float]:
+    """Compute 60-day annualized residual (idiosyncratic) volatility vs SPY.
+
+    Following Baker, Bradley & Wurgler (2011, FAJ), sizing by total volatility
+    $\\sqrt{\\beta_i^2 \\sigma_m^2 + \\sigma_{\\varepsilon,i}^2}$ mechanically
+    penalizes market beta and crowds the portfolio into low-beta bond proxies.
+    Residual volatility $\\sigma_{\\varepsilon,i}$ makes conviction/volatility
+    sizing invariant to market beta. Falls back to total volatility when SPY
+    bars are unavailable.
+    """
+    total_vols = _volatilities_60d(bars, as_of)
+    spy_series = [b for b in bars.get(_SPY, ()) if b.on <= as_of and b.close > 0.0][-61:]
+    if len(spy_series) < 16:
+        return total_vols
+    spy_rets = {
+        spy_series[i].on: spy_series[i].close / spy_series[i - 1].close - 1.0
+        for i in range(1, len(spy_series))
+    }
+    out = dict(total_vols)
+    for ticker, series in bars.items():
+        if ticker == _SPY:
+            continue
+        window = [b for b in series if b.on <= as_of and b.close > 0.0][-61:]
+        if len(window) < 16:
+            continue
+        asset_rets = {
+            window[i].on: window[i].close / window[i - 1].close - 1.0 for i in range(1, len(window))
+        }
+        common = sorted(asset_rets.keys() & spy_rets.keys())
+        if len(common) < 15:
+            continue
+        ri = [asset_rets[d] for d in common]
+        rm = [spy_rets[d] for d in common]
+        mean_i = statistics.mean(ri)
+        mean_m = statistics.mean(rm)
+        var_m = sum((x - mean_m) ** 2 for x in rm)
+        if var_m <= 1e-12:
+            continue
+        cov_im = sum((x - mean_i) * (y - mean_m) for x, y in zip(ri, rm, strict=True))
+        beta_hat = cov_im / var_m
+        alpha_hat = mean_i - beta_hat * mean_m
+        resids = [x - alpha_hat - beta_hat * y for x, y in zip(ri, rm, strict=True)]
+        if len(resids) >= 2:
+            out[ticker] = max(0.05, statistics.stdev(resids) * math.sqrt(252.0))
+    return out
+
+
+def _build_exposure_report(
+    *,
+    targets: Mapping[Ticker, float],
+    bars: Mapping[Ticker, Sequence[PriceBar]],
+    as_of: date,
+    sectors: Mapping[Ticker, str],
+) -> ExposureReport:
+    """Compute portfolio beta (OLS + Welch 2022), SPY sector gaps, and tracking error."""
+    spy_closes = [b.close for b in bars.get(_SPY, ()) if b.on <= as_of and b.close > 0.0]
+    total_w = sum(w for w in targets.values() if w > 0.0)
+    beta_ols = 0.0
+    beta_welch = 0.0
+    resid_var_sum = 0.0
+    resid_vols = _residual_volatilities_60d(bars, as_of)
+    for ticker, weight in targets.items():
+        if weight <= 0.0:
+            continue
+        closes = [b.close for b in bars.get(ticker, ()) if b.on <= as_of and b.close > 0.0]
+        b_ols = estimate_beta_from_prices(closes, spy_closes if spy_closes else None)
+        b_welch = estimate_welch_beta(closes, spy_closes if spy_closes else None)
+        beta_ols += weight * b_ols
+        beta_welch += weight * b_welch
+        sig_e = resid_vols.get(ticker, 0.20)
+        resid_var_sum += (weight * sig_e) ** 2
+
+    spy_vol = _volatilities_60d(bars, as_of).get(_SPY, 0.16)
+    active_beta = beta_welch - 1.0
+    ex_ante_te = math.sqrt((active_beta * spy_vol) ** 2 + resid_var_sum)
+
+    sec_weights: dict[str, float] = {}
+    for ticker, weight in targets.items():
+        if weight <= 0.0:
+            continue
+        sec = sectors.get(ticker, "market_default")
+        sec_weights[sec] = sec_weights.get(sec, 0.0) + weight
+
+    spy_sec = {s.value: w for s, w in SPY_SECTOR_WEIGHTS.items()}
+    all_secs = sorted(set(sec_weights) | set(spy_sec))
+    gaps = {
+        sec: sec_weights.get(sec, 0.0) - spy_sec.get(sec, 0.0)
+        for sec in all_secs
+        if sec != "market_default" or sec in sec_weights
+    }
+    warnings: list[str] = []
+    if total_w > 0.0 and (beta_welch < 0.80 or beta_welch > 1.10):
+        warnings.append(
+            f"portfolio beta_welch={beta_welch:.2f} outside [0.80, 1.10] "
+            f"(active_beta={active_beta:+.2f})"
+        )
+    for sec, gap in sorted(gaps.items()):
+        if abs(gap) > 0.15:
+            warnings.append(f"sector active gap on {sec} is {gap:+.1%} (> 15 pp vs SPY)")
+
+    return ExposureReport(
+        beta_ols=beta_ols,
+        beta_welch=beta_welch,
+        active_beta_vs_spy=active_beta,
+        ex_ante_tracking_error=ex_ante_te,
+        sector_weights=sec_weights,
+        active_sector_gaps_vs_spy=gaps,
+        warnings=tuple(warnings),
+    )
 
 
 def _avg_correlations_60d(
@@ -766,6 +926,7 @@ def _build_position_risks(
 ) -> dict[Ticker, PositionRiskSnapshot]:
     held_shares = {t: p.shares for t, p in positions.items() if p.shares > 0.0}
     entries = _latest_entries(log, held_shares=held_shares)
+    late_fills = _late_entry_fills(log, entries)
     out: dict[Ticker, PositionRiskSnapshot] = {}
     highs = intraday_highs or {}
     vols = volatilities or {}
@@ -775,13 +936,16 @@ def _build_position_risks(
             continue
         entry_date, logged_entry_price = entries.get(ticker, (as_of, pos.price))
         entry_price = (
-            pos.avg_entry_price
+            max(logged_entry_price, pos.avg_entry_price)
             if pos.avg_entry_price is not None and pos.avg_entry_price > 0.0
             else logged_entry_price
         )
+        include_entry_day_high = (as_of > entry_date) and (ticker not in late_fills)
         series = bars.get(ticker, ())
         since_entry = [
             max(b.close, b.high or b.close)
+            if (b.on > entry_date or include_entry_day_high)
+            else max(entry_price, b.close)
             for b in series
             if entry_date <= b.on <= as_of
         ]
@@ -817,9 +981,7 @@ def _latest_entries(
     from backdating a fresh entry.
     """
     events = list(log)
-    tickers_with_fills = {
-        Ticker(e.ticker) for e in events if e.kind is ExecutionEventKind.FILLED
-    }
+    tickers_with_fills = {Ticker(e.ticker) for e in events if e.kind is ExecutionEventKind.FILLED}
     entries: dict[Ticker, tuple[date, float]] = {}
     net: dict[Ticker, float] = {}
     open_buys: dict[Ticker, list[tuple[date, float, float]]] = {}
@@ -860,6 +1022,25 @@ def _latest_entries(
                 if acc >= target_qty * 0.99:
                     break
     return entries
+
+
+def _late_entry_fills(
+    log: SqliteExecutionLog,
+    entries: Mapping[Ticker, tuple[date, float]],
+) -> set[Ticker]:
+    """Tickers whose Lot-1 FILLED event occurred after the morning open window (10:00 ET)."""
+    late: set[Ticker] = set()
+    for event in log:
+        if event.kind is not ExecutionEventKind.FILLED or event.side != "buy":
+            continue
+        ticker = Ticker(event.ticker)
+        entry = entries.get(ticker)
+        if entry is None or event.recorded_at.date() != entry[0]:
+            continue
+        ny_time = event.recorded_at.astimezone(_NYSE_TZ)
+        if (ny_time.hour, ny_time.minute) >= (10, 0):
+            late.add(ticker)
+    return late
 
 
 def _resolve_session_date(

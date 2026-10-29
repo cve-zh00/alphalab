@@ -299,10 +299,13 @@ def test_dispersion_adjusted_mos_supports_c1b_and_penalizes_single_method() -> N
 
     c1b_score = _dispersion_adjusted_mos(c1b_art)
     single_score = _dispersion_adjusted_mos(single_art)
-    # c1b conservative target = 0.5*(140+200) = 170 -> +70% / 0.60 = 1.167
-    # single method = +20% / 1.0 (single-method floor) = 0.20
-    assert c1b_score == pytest.approx(0.70 / 0.60)
-    assert single_score == pytest.approx(0.20)
+    # Continuous Empirical Bayes shrinkage (Smith & Winkler 2006) divided by max(span, floor)
+    from alphalab.domain.compute.sectors import shrink_upside_empirical_bayes
+
+    expected_c1b = shrink_upside_empirical_bayes(0.70, relative_span=0.60, methods_count=3) / 0.60
+    expected_single = shrink_upside_empirical_bayes(0.20, relative_span=0.0, methods_count=1) / 1.0
+    assert c1b_score == pytest.approx(expected_c1b)
+    assert single_score == pytest.approx(expected_single)
     assert c1b_score > single_score
 
 
@@ -364,4 +367,3 @@ def test_prescreen_for_llm_excludes_cooldown_and_rotates_batches(
         deprioritized_tickers={Ticker("BBB"), Ticker("CCC")},
     )
     assert batch2 == (Ticker("HELD"), Ticker("DDD"), Ticker("EEE"))
-

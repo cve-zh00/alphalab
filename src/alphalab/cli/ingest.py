@@ -70,7 +70,7 @@ from alphalab.domain.analyst.contracts import RunMetadata
 from alphalab.domain.analyst.tiers import ModelTier
 from alphalab.domain.compute.sectors import (
     compute_capm_cost_of_equity,
-    estimate_beta_from_prices,
+    estimate_ke_beta_from_prices,
     resolve_sector_profile,
 )
 from alphalab.domain.pit import PITRecord
@@ -175,16 +175,10 @@ def _calibrated_assumptions(
     """Build sector- and beta-calibrated valuation assumptions for ``ticker``."""
     profile = resolve_sector_profile(ticker)
     asset_points = [
-        p.close
-        for p in price_source.series(Ticker(ticker.upper()))
-        if p.on <= knowledge_date
+        p.close for p in price_source.series(Ticker(ticker.upper())) if p.on <= knowledge_date
     ]
-    bench_points = [
-        p.close
-        for p in price_source.series(Ticker("SPY"))
-        if p.on <= knowledge_date
-    ]
-    beta = estimate_beta_from_prices(
+    bench_points = [p.close for p in price_source.series(Ticker("SPY")) if p.on <= knowledge_date]
+    beta = estimate_ke_beta_from_prices(
         asset_points,
         bench_points if bench_points else None,
         default_beta=profile.beta,
@@ -424,9 +418,7 @@ def _build_live_request(
             scorer = sentiment_scorer or FinBertSentimentScorer()
             note = scorer.score_documents(extra_docs).regime_note()
             extra_docs = (note, *extra_docs)
-    return result.request.model_copy(
-        update={"documents": (*result.request.documents, *extra_docs)}
-    )
+    return result.request.model_copy(update={"documents": (*result.request.documents, *extra_docs)})
 
 
 def load_news_sentiment_fn(

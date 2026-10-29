@@ -158,6 +158,19 @@ def autopilot_cycle_json(
             }
             for o in result.agentic_plan.outcomes
         ],
+        "exposure": (
+            {
+                "beta_ols": result.exposure.beta_ols,
+                "beta_welch": result.exposure.beta_welch,
+                "active_beta_vs_spy": result.exposure.active_beta_vs_spy,
+                "ex_ante_tracking_error": result.exposure.ex_ante_tracking_error,
+                "sector_weights": dict(result.exposure.sector_weights),
+                "active_sector_gaps_vs_spy": dict(result.exposure.active_sector_gaps_vs_spy),
+                "warnings": list(result.exposure.warnings),
+            }
+            if result.exposure is not None
+            else None
+        ),
         "position_risks": [
             {
                 "ticker": str(pos.ticker),

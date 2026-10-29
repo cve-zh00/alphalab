@@ -344,17 +344,22 @@ def compute_wealth_eprocess(
     benchmark_returns: Sequence[float] | None = None,
     *,
     bet_fraction_cap: float = 0.5,
+    return_bound: float = 0.10,
 ) -> WealthEProcessResult:
     """Compute the anytime-valid Kelly/GRAPA wealth e-process for excess returns.
 
     Tests $H_0: \\mathbb{E}[r_{s,t} - r_{b,t}] \\le 0$ at any stopping time $t$
-    using predictable plug-in betting fractions $\\lambda_t \\in [0, \\text{bet\\_fraction\\_cap}]$
+    using bounded normalized increments $y_t = \\text{clip}(r_{s,t} - r_{b,t}, -c, c) / c$
+    with $c = \\text{return\\_bound}$ (Waudby-Smith & Ramdas 2024, *JRSS-B*) and
+    predictable plug-in betting fractions $\\lambda_t \\in [0, \\text{bet\\_fraction\\_cap}]$
     with $\\lambda_1 = 0$. By Ville's inequality (Ramdas, Grünwald, Vovk & Shafer
     2023, *Statistical Science*), $E_t \\ge 1/\\alpha = 20.0$ rejects $H_0$ at
     level $\\alpha = 0.05$ with continuous monitoring.
     """
     if not (0.0 < bet_fraction_cap <= 1.0):
         raise ValueError("bet_fraction_cap must lie in (0, 1]")
+    if return_bound <= 0.0:
+        raise ValueError("return_bound must be positive")
     strat = np.asarray(strategy_returns, dtype=np.float64)
     if strat.ndim != 1:
         raise ValueError("strategy_returns must be one-dimensional")
@@ -376,35 +381,34 @@ def compute_wealth_eprocess(
             safe_lower_bound=0.0,
         )
 
-    excess = np.maximum(raw_excess, -0.99)
+    c = float(return_bound)
+    y = np.clip(raw_excess, -c, c) / c
     log_wealth = 0.0
     lambdas = np.zeros(n, dtype=np.float64)
 
     for t in range(1, n):
-        prefix = excess[:t]
+        prefix = y[:t]
         mu_hat = float(np.mean(prefix))
         sigma2_hat = max(float(np.var(prefix)), 1e-4)
         lam = float(np.clip(mu_hat / sigma2_hat, 0.0, bet_fraction_cap))
         lambdas[t] = lam
-        step_factor = max(1e-12, 1.0 + lam * float(excess[t]))
+        step_factor = max(1e-12, 1.0 + lam * float(y[t]))
         log_wealth += math.log(step_factor)
 
-    wealth = math.exp(min(log_wealth, 700.0))
+    wealth = math.exp(min(log_log := log_wealth, 700.0))
     threshold_log = math.log(20.0)
     reject_null = wealth >= 20.0
 
     total_lambda = float(np.sum(lambdas))
     if total_lambda <= 1e-12:
-        safe_lower = -threshold_log / max(float(n), 1.0)
+        safe_lower = -c * threshold_log / max(float(n), 1.0)
     else:
-        safe_lower = (log_wealth - threshold_log) / total_lambda
+        safe_lower = c * (log_log - threshold_log) / total_lambda
 
     return WealthEProcessResult(
         wealth=wealth,
-        log_wealth=log_wealth,
+        log_wealth=log_log,
         observations=n,
         reject_null_alpha_05=reject_null,
         safe_lower_bound=safe_lower,
     )
-
-

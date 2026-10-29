@@ -311,9 +311,7 @@ _MAX_BUYBACK_YIELD = 0.06
 _YEAR_DAYS = 365.25
 
 
-def _resolve_net_buyback_yield(
-    store: ParquetPITStore, ticker: Ticker, kd: KnowledgeDate
-) -> float:
+def _resolve_net_buyback_yield(store: ParquetPITStore, ticker: Ticker, kd: KnowledgeDate) -> float:
     """Annualised net share-count reduction over up to ~3 trailing years.
 
     Returns a fraction clamped to ``[0, 0.06]``; dilution or missing data -> 0.
@@ -323,9 +321,7 @@ def _resolve_net_buyback_yield(
         return 0.0
     end_date, end_val = series[-1]
     candidates = [
-        (d, v)
-        for d, v in series[:-1]
-        if 300 <= (end_date - d).days <= 3.5 * _YEAR_DAYS and v > 0.0
+        (d, v) for d, v in series[:-1] if 300 <= (end_date - d).days <= 3.5 * _YEAR_DAYS and v > 0.0
     ]
     if not candidates or end_val <= 0.0:
         return 0.0
@@ -383,6 +379,20 @@ def _build_estimates(
         _try_pe(values, assumptions, estimates, used, omitted)
     _try_ev_ebitda(values, assumptions, estimates, used, omitted)
     _try_pb(values, assumptions, estimates, used, omitted)
+    if math.isfinite(current_price) and current_price > 0.0:
+        plausible_est: list[ProvenancedValue] = []
+        plausible_used: list[str] = []
+        for est, tag in zip(estimates, used, strict=True):
+            ratio = est.value / current_price
+            if math.isfinite(ratio) and 0.05 <= ratio <= 20.0:
+                plausible_est.append(est)
+                plausible_used.append(tag)
+            else:
+                omitted.append(
+                    f"{tag}: unit plausibility failed (V/P={ratio:.3f} outside [0.05, 20.0])"
+                )
+        estimates = plausible_est
+        used = plausible_used
     return estimates, used, omitted
 
 
@@ -508,9 +518,7 @@ def _try_ddm(
         and assumptions.min_payout_ratio > 0.0
         and (eps <= 0.0 or (dps / eps) < assumptions.min_payout_ratio)
     ):
-        omitted.append(
-            f"ddm: payout ratio below {assumptions.min_payout_ratio:.0%} minimum"
-        )
+        omitted.append(f"ddm: payout ratio below {assumptions.min_payout_ratio:.0%} minimum")
         return
     effective_dps = dps
     if buyback_yield > 0.0 and math.isfinite(current_price) and current_price > 0.0:
@@ -709,6 +717,7 @@ def _compute_piotroski_and_yoy(
     Signals with missing inputs are skipped; ``None`` when fewer than five are
     computable (or no two annual periods exist).
     """
+
     def ser(f: FundamentalField) -> list[tuple[date, float]]:
         return _annual_series(store, ticker, f, kd)
 

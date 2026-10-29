@@ -90,6 +90,9 @@ class AutopilotGuardConfig(BaseModel):
     sell_confirmations_required: int = Field(default=1, ge=1)
     hold_keeps_existing_position: bool = True
     retain_on_research_failure: bool = True
+    rebalance_band_abs: float = Field(default=0.025, ge=0.0)
+    protect_held_buys_from_dilution: bool = True
+    block_losing_topups: bool = True
 
 
 class PositionRiskSnapshot(BaseModel):
@@ -220,10 +223,7 @@ def should_drawdown_close(
     scale by Ornstein-Uhlenbeck convergence distance (Leung & Li 2015).
     """
     arm_pct, giveback_pct = _effective_drawdown_thresholds(snapshot, config)
-    return (
-        snapshot.peak_pnl_pct >= arm_pct
-        and snapshot.profit_giveback_pct >= giveback_pct
-    )
+    return snapshot.peak_pnl_pct >= arm_pct and snapshot.profit_giveback_pct >= giveback_pct
 
 
 def apply_nofx_guards(
@@ -241,6 +241,11 @@ def apply_nofx_guards(
     config: AutopilotGuardConfig | None = None,
     sectors: Mapping[Ticker, str] | None = None,
     max_sector_weight: float = 0.25,
+    benchmark_sector_weights: Mapping[str, float] | None = None,
+    sector_active_band: float = 0.12,
+    betas: Mapping[Ticker, float] | None = None,
+    min_portfolio_beta: float | None = None,
+    max_portfolio_beta: float | None = None,
 ) -> GuardedTargets:
     """Apply NOFX runtime risk guards to model-proposed target weights.
 
@@ -289,9 +294,32 @@ def apply_nofx_guards(
             current_weights=current_weights,
             sectors=sectors,
             cap=max_sector_weight,
+            benchmark_sector_weights=benchmark_sector_weights,
+            sector_active_band=sector_active_band,
             actions=actions,
         )
     capped = _enforce_cash_headroom(capped, positions=positions)
+    if capped and (
+        sectors is not None or benchmark_sector_weights is not None or betas is not None
+    ):
+        locked = frozenset(t for t in positions if t in capped)
+        unlocked_max = max(
+            (w for t, w in capped.items() if t not in locked),
+            default=0.10,
+        )
+        capped = project_feasible_weights_dykstra(
+            capped,
+            max_position_weight=max(0.10, unlocked_max),
+            sectors=sectors,
+            max_sector_weight=max_sector_weight,
+            benchmark_sector_weights=benchmark_sector_weights,
+            sector_active_band=sector_active_band,
+            betas=betas,
+            min_portfolio_beta=min_portfolio_beta,
+            max_portfolio_beta=max_portfolio_beta,
+            max_gross_exposure=1.0,
+            locked_tickers=locked,
+        )
     reason = safe_mode_reason or "model evaluation coverage below minimum threshold"
     return GuardedTargets(
         targets=capped,
@@ -320,9 +348,7 @@ def _evaluate_open_positions(
         verdict = verdicts.get(ticker)
         prior_sells = prior_sell_counts.get(ticker, 0)
         retained_weight = (
-            current_weights.get(ticker, slot_weight)
-            if current_weights is not None
-            else slot_weight
+            current_weights.get(ticker, slot_weight) if current_weights is not None else slot_weight
         )
         exit_action = _protective_exit_for(pos, verdict, prior_sells, rules)
         if exit_action is not None:
@@ -330,8 +356,19 @@ def _evaluate_open_positions(
             continue
         if ticker in proposed_targets and proposed_targets[ticker] > 0.0:
             proposed_w = proposed_targets[ticker]
-            if current_weights is not None and abs(proposed_w - retained_weight) < 0.02:
-                surviving[ticker] = retained_weight
+            if current_weights is not None:
+                if (
+                    (rules.protect_held_buys_from_dilution and proposed_w < retained_weight)
+                    or (
+                        rules.block_losing_topups
+                        and proposed_w > retained_weight
+                        and pos.price_pnl_pct < 0.0
+                    )
+                    or abs(proposed_w - retained_weight) < rules.rebalance_band_abs
+                ):
+                    surviving[ticker] = retained_weight
+                else:
+                    surviving[ticker] = proposed_w
             else:
                 surviving[ticker] = proposed_w
             continue
@@ -485,6 +522,18 @@ def _cooldown_block_for(
     return None
 
 
+def _sector_limit_for(
+    sector: str,
+    *,
+    default_cap: float,
+    benchmark_sector_weights: Mapping[str, float] | None,
+    sector_active_band: float,
+) -> float:
+    if benchmark_sector_weights is not None and sector in benchmark_sector_weights:
+        return min(0.30, max(0.05, float(benchmark_sector_weights[sector]) + sector_active_band))
+    return default_cap
+
+
 def _enforce_sector_cap(
     surviving: dict[Ticker, float],
     *,
@@ -493,21 +542,27 @@ def _enforce_sector_cap(
     sectors: Mapping[Ticker, str],
     cap: float,
     actions: list[GuardAction],
+    benchmark_sector_weights: Mapping[str, float] | None = None,
+    sector_active_band: float = 0.12,
 ) -> None:
-    """Scale down / block *new entries* that push a sector above ``cap``.
+    """Scale down / block *new entries* that push a sector above its cap.
 
-    Held positions are never reduced or sold because of the cap; their weight
-    simply consumes sector headroom first. New entries are admitted in ticker
-    order until headroom runs out (the last one is scaled to fit).
+    Held positions are never reduced or sold because of the cap; their post-trade
+    retained weight consumes sector headroom first (so any exited or reduced
+    position immediately frees sector room in the same cycle). New entries are
+    admitted by conviction weight until headroom runs out.
     """
     used: dict[str, float] = {}
     for t in positions:
+        if t not in surviving:
+            continue
         sector = sectors.get(t)
         if not sector:
             continue
         if current_weights is not None and t in current_weights:
-            used[sector] = used.get(sector, 0.0) + current_weights[t]
-        elif t in surviving:
+            base_w = min(current_weights[t], surviving[t])
+            used[sector] = used.get(sector, 0.0) + base_w
+        else:
             used[sector] = used.get(sector, 0.0) + surviving[t]
     for t in sorted(surviving):
         sector = sectors.get(t)
@@ -519,7 +574,13 @@ def _enforce_sector_cap(
         delta = surviving[t] - held_w
         if delta <= 1e-12:
             continue
-        room = max(0.0, cap - used.get(sector, 0.0))
+        sec_cap = _sector_limit_for(
+            sector,
+            default_cap=cap,
+            benchmark_sector_weights=benchmark_sector_weights,
+            sector_active_band=sector_active_band,
+        )
+        room = max(0.0, sec_cap - used.get(sector, 0.0))
         if delta <= room + 1e-12:
             used[sector] = used.get(sector, 0.0) + delta
         else:
@@ -531,7 +592,7 @@ def _enforce_sector_cap(
                     ticker=t,
                     kind=GuardActionKind.SECTOR_CAP_BLOCKED,
                     reason=(
-                        f"sector cap: {sector} limited to {cap:.0%}; "
+                        f"sector cap: {sector} limited to {sec_cap:.0%}; "
                         f"top-up capped at {new_w:.2%}"
                     ),
                 )
@@ -544,8 +605,14 @@ def _enforce_sector_cap(
         sector = sectors.get(t)
         if not sector:
             continue
+        sec_cap = _sector_limit_for(
+            sector,
+            default_cap=cap,
+            benchmark_sector_weights=benchmark_sector_weights,
+            sector_active_band=sector_active_band,
+        )
         weight = surviving[t]
-        room = cap - used.get(sector, 0.0)
+        room = sec_cap - used.get(sector, 0.0)
         if weight <= room + 1e-12:
             used[sector] = used.get(sector, 0.0) + weight
             continue
@@ -555,18 +622,18 @@ def _enforce_sector_cap(
                 GuardAction(
                     ticker=t,
                     kind=GuardActionKind.SECTOR_CAP_BLOCKED,
-                    reason=f"sector cap: {sector} already at {cap:.0%}; new entry blocked",
+                    reason=f"sector cap: {sector} already at {sec_cap:.0%}; new entry blocked",
                 )
             )
         else:
             surviving[t] = room
-            used[sector] = cap
+            used[sector] = sec_cap
             actions.append(
                 GuardAction(
                     ticker=t,
                     kind=GuardActionKind.SECTOR_CAP_BLOCKED,
                     reason=(
-                        f"sector cap: {sector} limited to {cap:.0%}; "
+                        f"sector cap: {sector} limited to {sec_cap:.0%}; "
                         f"entry scaled {weight:.2%} -> {room:.2%}"
                     ),
                 )
@@ -623,11 +690,21 @@ def project_feasible_weights_dykstra(
     max_position_weight: float = 0.10,
     sectors: Mapping[Ticker, str] | None = None,
     max_sector_weight: float = 0.25,
+    benchmark_sector_weights: Mapping[str, float] | None = None,
+    sector_active_band: float = 0.12,
+    betas: Mapping[Ticker, float] | None = None,
+    min_portfolio_beta: float | None = None,
+    max_portfolio_beta: float | None = None,
     max_gross_exposure: float = 1.0,
     locked_tickers: frozenset[Ticker] = frozenset(),
-    iterations: int = 20,
+    iterations: int = 200,
 ) -> dict[Ticker, float]:
-    """Project target weights onto box, sector, and gross constraints via Dykstra (1983)."""
+    """Project target weights onto box, sector, beta, and gross constraints via Dykstra (1983).
+
+    Supports SPY-relative sector ceilings ``min(0.30, w_SPY,s + sector_active_band)``
+    and affine halfspace projections for portfolio market beta (Boyle & Dykstra 1986;
+    Roll 1992).
+    """
     if max_position_weight <= 0.0:
         raise ValueError("max_position_weight must be positive")
     if max_sector_weight <= 0.0:
@@ -647,6 +724,8 @@ def project_feasible_weights_dykstra(
 
     p_box = [0.0] * n
     p_sec = [0.0] * n
+    p_beta_lo = [0.0] * n
+    p_beta_hi = [0.0] * n
     p_gross = [0.0] * n
 
     sector_groups: dict[str, list[int]] = {}
@@ -657,6 +736,7 @@ def project_feasible_weights_dykstra(
                 sector_groups.setdefault(sec, []).append(idx)
 
     unlocked_indices = [i for i in range(n) if not locked_mask[i]]
+    beta_vec = [float(betas.get(t, 1.0)) for t in tickers] if betas is not None else [1.0] * n
 
     def _proj_box(vec: list[float]) -> list[float]:
         out = [0.0] * n
@@ -671,15 +751,59 @@ def project_feasible_weights_dykstra(
         if not sector_groups:
             return list(vec)
         out = list(vec)
-        for indices in sector_groups.values():
+        for sec, indices in sector_groups.items():
             locked_sum = sum(max(0.0, out[i]) for i in indices if locked_mask[i])
             unlocked_sec = [i for i in indices if not locked_mask[i]]
             if not unlocked_sec:
                 continue
-            rem_cap = max(0.0, max_sector_weight - locked_sum)
+            sec_cap = _sector_limit_for(
+                sec,
+                default_cap=max_sector_weight,
+                benchmark_sector_weights=benchmark_sector_weights,
+                sector_active_band=sector_active_band,
+            )
+            rem_cap = max(0.0, sec_cap - locked_sum)
             proj_vals = _project_simplex_ball([out[i] for i in unlocked_sec], rem_cap)
             for i, pv in zip(unlocked_sec, proj_vals, strict=True):
                 out[i] = pv
+        return out
+
+    def _proj_beta_low(vec: list[float]) -> list[float]:
+        if betas is None or min_portfolio_beta is None or not unlocked_indices:
+            return list(vec)
+        # Halfspace: sum_i (beta_i - min_beta) * w_i >= 0
+        a = [0.0 if locked_mask[i] else (beta_vec[i] - min_portfolio_beta) for i in range(n)]
+        if not any(a[i] > 1e-9 for i in unlocked_indices):
+            return list(vec)
+        norm_sq = sum(a[i] * a[i] for i in unlocked_indices)
+        if norm_sq <= 1e-12:
+            return list(vec)
+        lhs = sum((beta_vec[i] - min_portfolio_beta) * vec[i] for i in range(n))
+        if lhs >= 0.0:
+            return list(vec)
+        step = -lhs / norm_sq
+        out = list(vec)
+        for i in unlocked_indices:
+            out[i] = vec[i] + step * a[i]
+        return out
+
+    def _proj_beta_high(vec: list[float]) -> list[float]:
+        if betas is None or max_portfolio_beta is None or not unlocked_indices:
+            return list(vec)
+        # Halfspace: sum_i (max_beta - beta_i) * w_i >= 0
+        a = [0.0 if locked_mask[i] else (max_portfolio_beta - beta_vec[i]) for i in range(n)]
+        if not any(a[i] > 1e-9 for i in unlocked_indices):
+            return list(vec)
+        norm_sq = sum(a[i] * a[i] for i in unlocked_indices)
+        if norm_sq <= 1e-12:
+            return list(vec)
+        lhs = sum((max_portfolio_beta - beta_vec[i]) * vec[i] for i in range(n))
+        if lhs >= 0.0:
+            return list(vec)
+        step = -lhs / norm_sq
+        out = list(vec)
+        for i in unlocked_indices:
+            out[i] = vec[i] + step * a[i]
         return out
 
     def _proj_gross(vec: list[float]) -> list[float]:
@@ -702,11 +826,19 @@ def project_feasible_weights_dykstra(
         x = _proj_sector(y_sec)
         p_sec = [y_sec[i] - x[i] for i in range(n)]
 
+        y_blo = [x[i] + p_beta_lo[i] for i in range(n)]
+        x = _proj_beta_low(y_blo)
+        p_beta_lo = [y_blo[i] - x[i] for i in range(n)]
+
+        y_bhi = [x[i] + p_beta_hi[i] for i in range(n)]
+        x = _proj_beta_high(y_bhi)
+        p_beta_hi = [y_bhi[i] - x[i] for i in range(n)]
+
         y_gross = [x[i] + p_gross[i] for i in range(n)]
         x = _proj_gross(y_gross)
         p_gross = [y_gross[i] - x[i] for i in range(n)]
 
-    # Final feasibility pass ensures exact satisfaction of all constraints.
+    # Final feasibility pass ensures exact satisfaction of box, sector, and gross bounds.
     x = _proj_gross(_proj_sector(_proj_box(x)))
     return {t: w for t, w in zip(tickers, x, strict=True) if w > 1e-6}
 

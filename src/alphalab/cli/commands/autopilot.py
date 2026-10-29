@@ -67,7 +67,11 @@ from alphalab.cli.fixtures import build_fixture_request
 from alphalab.cli.ingest import load_live_builder, load_news_sentiment_fn
 from alphalab.cli.paper_transport import HttpxWriteTransport
 from alphalab.domain.backtest import PriceBar, ProportionalCostModel
-from alphalab.domain.compute.sectors import shrink_upside_empirical_bayes
+from alphalab.domain.compute.sectors import (
+    GicsSector,
+    resolve_sector_profile,
+    shrink_upside_empirical_bayes,
+)
 from alphalab.domain.contract.gate import conservative_c1b_upside
 from alphalab.domain.costs import CostSpec
 from alphalab.domain.execution import AutopilotGuardConfig
@@ -549,9 +553,7 @@ def _build_runner(
             if isinstance(price_source, PanelPriceSeriesSource):
                 price_source.current_as_of = opts.as_of or eval_date
                 price_source.update_panel(bars)
-            return select_liquid_candidates(
-                eval_date, bars, held_tickers, cap=opts.candidate_cap
-            )
+            return select_liquid_candidates(eval_date, bars, held_tickers, cap=opts.candidate_cap)
 
         selector = _default_selector
     research = research_fn or _make_research_fn(opts, price_source=price_source, err=err)
@@ -699,6 +701,10 @@ def _prescreen_for_llm(
             score = _dispersion_adjusted_mos(art)
             if score > 0.0:
                 scored_buys.append((score, -idx, t))
+    if len(scored_buys) >= 2:
+        scored_buys = _apply_sector_and_momentum_adjustments(
+            scored_buys, price_source=price_source, as_of=as_of
+        )
     scored_buys.sort(reverse=True)
     pool_limit = max(rotation_pool_size, 3 * max(1, cap))
     if sentiment_fn is None:
@@ -724,6 +730,99 @@ def _prescreen_for_llm(
     return tuple(selected)
 
 
+def _compute_momentum_12_1(
+    ticker: Ticker,
+    price_source: PriceSeriesSource | None,
+    as_of: date,
+) -> float | None:
+    """Compute 12-1 month price momentum (Asness, Moskowitz & Pedersen 2013; Jegadeesh 1990).
+
+    Measures return from ``t-252`` (or earliest bar >= 65 days ago) to ``t-21``,
+    skipping the most recent 21 trading days to avoid short-term reversal.
+    """
+    if price_source is None:
+        return None
+    with contextlib.suppress(Exception):
+        pts = [p for p in price_source.series(ticker) if p.on <= as_of and p.close > 0.0]
+        if len(pts) < 65:
+            return None
+        end_idx = len(pts) - 22
+        start_idx = max(0, len(pts) - 253)
+        if end_idx <= start_idx:
+            return None
+        p_start = pts[start_idx].close
+        p_end = pts[end_idx].close
+        if p_start <= 0.0 or p_end <= 0.0:
+            return None
+        return float(p_end / p_start - 1.0)
+    return None
+
+
+def _apply_sector_and_momentum_adjustments(
+    scored: list[tuple[float, int, Ticker]],
+    *,
+    price_source: PriceSeriesSource | None,
+    as_of: date,
+    sector_blend: float = 0.50,
+) -> list[tuple[float, int, Ticker]]:
+    """Blend absolute MoS with within-sector standardized MoS and 12-1 momentum filter.
+
+    Implements Ehsani, Harvey & Li (2023, FAJ) sector-neutral value blending so
+    structurally low-beta/high-yield sectors do not crowd out top-of-sector
+    candidates in IT/Communication Services, and penalizes severe 12-1 momentum
+    crashes (Asness, Moskowitz & Pedersen 2013; Daniel & Moskowitz 2016).
+    """
+    import statistics
+
+    if not scored:
+        return scored
+    by_sector: dict[GicsSector, list[float]] = {}
+    sectors_for: dict[Ticker, GicsSector] = {}
+    all_scores = [s for s, _neg_idx, _t in scored]
+    for s, _neg_idx, t in scored:
+        sec = resolve_sector_profile(str(t)).sector
+        sectors_for[t] = sec
+        by_sector.setdefault(sec, []).append(s)
+
+    distinct_named_sectors = {sec for sec in by_sector if sec is not GicsSector.MARKET_DEFAULT}
+    use_sector_z = len(distinct_named_sectors) >= 2 and len(all_scores) >= 2
+    mu_all = float(statistics.mean(all_scores)) if len(all_scores) >= 2 else 0.0
+    sd_all = max(0.15, float(statistics.pstdev(all_scores))) if len(all_scores) >= 2 else 1.0
+    sec_stats: dict[GicsSector, tuple[float, float]] = {}
+    if use_sector_z:
+        for sec, vals in by_sector.items():
+            if len(vals) >= 2:
+                sec_stats[sec] = (
+                    float(statistics.mean(vals)),
+                    max(0.15, float(statistics.pstdev(vals))),
+                )
+            else:
+                sec_stats[sec] = (vals[0], sd_all)
+
+    alpha = max(0.0, min(1.0, float(sector_blend)))
+    out: list[tuple[float, int, Ticker]] = []
+    for raw_score, neg_idx, t in scored:
+        blended = raw_score
+        if use_sector_z:
+            sec = sectors_for[t]
+            mu_s, sd_s = sec_stats[sec]
+            z_sec = (raw_score - mu_s) / sd_s
+            sec_rescaled = max(0.05 * raw_score, mu_all + sd_all * z_sec)
+            blended = (1.0 - alpha) * raw_score + alpha * sec_rescaled
+
+        mom = _compute_momentum_12_1(t, price_source, as_of)
+        if mom is not None:
+            if mom <= -0.25:
+                blended *= 0.35
+            elif mom <= -0.15:
+                blended *= 0.65
+            elif mom >= 0.05:
+                blended *= 1.10
+        out.append((max(1e-6, float(blended)), neg_idx, t))
+    out.sort(reverse=True)
+    return out
+
+
 def _apply_sentiment_penalty(
     scored: list[tuple[float, int, Ticker]],
     sentiment_fn: Callable[[Ticker], float | None],
@@ -745,12 +844,13 @@ def _apply_sentiment_penalty(
 
 
 def _dispersion_adjusted_mos(art: EquityResearchArtifact) -> float:
-    """Compute Empirical-Bayes dispersion-adjusted Margin of Safety.
+    """Compute continuous Empirical-Bayes dispersion-adjusted Margin of Safety.
 
     Applies Smith & Winkler (2006) Empirical Bayes shrinkage toward the cross-
-    sectional prior before dividing by dispersion ``max(span, floor)``. Supports
-    both exact point targets (``not art.valuation_withheld``) and unanimous
-    multi-method C1b ranges via ``conservative_c1b_upside(art)``.
+    sectional prior continuously across all positive upside estimates before
+    dividing by dispersion ``max(span, floor)``. Supports both exact point
+    targets (``not art.valuation_withheld``) and unanimous multi-method C1b
+    ranges via ``conservative_c1b_upside(art)``.
     """
     if art.current_price <= 0.0:
         return -1e9
@@ -765,16 +865,14 @@ def _dispersion_adjusted_mos(art: EquityResearchArtifact) -> float:
         return -1e9
     raw_span = art.consensus_relative_span if art.consensus_relative_span is not None else 0.15
     span_floor = 0.15 if len(art.methods_used) >= 2 else 1.0
-    if upside > 1.0:
-        upside = 1.0 + max(
-            0.0,
-            shrink_upside_empirical_bayes(
-                upside - 1.0,
-                relative_span=raw_span,
-                methods_count=len(art.methods_used),
-            ),
-        )
-    return upside / max(raw_span, span_floor)
+    shrunk = shrink_upside_empirical_bayes(
+        upside,
+        relative_span=raw_span,
+        methods_count=len(art.methods_used),
+    )
+    if shrunk <= 0.0:
+        return -1e9
+    return shrunk / max(raw_span, span_floor)
 
 
 def _make_research_fn(
@@ -800,9 +898,7 @@ def _make_research_fn(
 
     def _research(ticker: Ticker) -> EquityResearchArtifact | None:
         effective_as_of = (
-            opts.as_of
-            or getattr(price_source, "current_as_of", None)
-            or datetime.now(UTC).date()
+            opts.as_of or getattr(price_source, "current_as_of", None) or datetime.now(UTC).date()
         )
         if opts.use_llm and not opts.as_json and err is not None:
             print(f"  [llm] evaluating {ticker}...", end="", file=err, flush=True)
@@ -810,9 +906,7 @@ def _make_research_fn(
             if live_builder is not None:
                 request = live_builder(str(ticker), knowledge_date=effective_as_of)
             else:
-                request = build_fixture_request(
-                    str(ticker), knowledge_date=effective_as_of
-                ).request
+                request = build_fixture_request(str(ticker), knowledge_date=effective_as_of).request
             fp: str | None = None
             cached: EquityResearchArtifact | None = None
             if verdict_cache is not None:

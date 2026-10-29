@@ -27,6 +27,7 @@ from alphalab.domain.contract.thresholds import PRICE_TEXT_DECIMALS
 
 # Clauses that, on failure, degrade the whole point (scrub everywhere).
 _HARD_CLAUSES: tuple[Callable[[EquityResearchArtifact], AuditFinding | None], ...] = (
+    clauses.check_c0_unit_plausibility,
     clauses.check_c1_upside_band,
     clauses.check_c2_numeric_concatenation,
     clauses.check_c3_conclusion_headline,

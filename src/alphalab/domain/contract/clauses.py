@@ -39,6 +39,44 @@ def _is_multi_method(artifact: EquityResearchArtifact) -> bool:
     return len(artifact.methods_used) > 1
 
 
+def check_c0_unit_plausibility(artifact: EquityResearchArtifact) -> AuditFinding | None:
+    """C0 (HARD): every per-method value V_m must satisfy V_m / P in [0.05, 20.0].
+
+    Catches scale/unit errors in individual valuation methods (such as corrupt
+    diluted share counts in SEC EDGAR filings) before or after consensus
+    aggregation.
+    """
+    if not artifact.method_values:
+        return None
+    if artifact.price_target is None and artifact.price_range is None:
+        return None
+    current = artifact.current_price
+    if not math.isfinite(current) or current <= 0.0:
+        return fail(
+            "contract_c0_unit_plausibility",
+            Severity.HARD,
+            f"current_price {current!r} is non-finite or non-positive for method plausibility",
+            values=(("current_price", _finite(current)),),
+        )
+    for method, val in artifact.method_values.items():
+        if not math.isfinite(val) or val <= 0.0:
+            return fail(
+                "contract_c0_unit_plausibility",
+                Severity.HARD,
+                f"method '{method}' produced non-finite or non-positive value {val!r}",
+                values=((method, _finite(val)), ("current_price", current)),
+            )
+        ratio = val / current
+        if ratio < 0.05 or ratio > 20.0:
+            return fail(
+                "contract_c0_unit_plausibility",
+                Severity.HARD,
+                f"method '{method}' V/P ratio {ratio:.3f} outside plausible band [0.05x, 20x]",
+                values=((method, val), ("ratio", ratio)),
+            )
+    return None
+
+
 def check_c1_upside_band(artifact: EquityResearchArtifact) -> AuditFinding | None:
     """C1 (HARD): target/current_price must fall in the calibrated band.
 
