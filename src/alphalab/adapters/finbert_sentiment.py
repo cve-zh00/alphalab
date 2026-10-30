@@ -119,7 +119,10 @@ class FinBertSentimentScorer:
                 device = "mps" if torch.backends.mps.is_available() else "cpu"
                 try:
                     pipe = pipeline(
-                        "text-classification", model=_MODEL_NAME, top_k=None, device=device,
+                        "text-classification",
+                        model=_MODEL_NAME,
+                        top_k=None,
+                        device=device,
                         model_kwargs={"local_files_only": True},
                     )
                 except Exception:

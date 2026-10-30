@@ -212,4 +212,3 @@ class TestWinklerAndOverconfidencePenalty:
         )
         assert shrunk < raw
         assert shrunk >= BASE_RATE
-

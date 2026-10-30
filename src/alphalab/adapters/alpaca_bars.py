@@ -284,4 +284,3 @@ def _parse_snapshot_highs(payload: dict[str, object]) -> dict[Ticker, float]:
         if vals:
             out[Ticker(symbol)] = max(vals)
     return out
-

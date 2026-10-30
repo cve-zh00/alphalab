@@ -150,9 +150,7 @@ def test_net_buyback_yield_annualised_and_clamped(tmp_path: Path) -> None:
         _rec("shares_outstanding", 97.0, date(2022, 12, 31), None),
         _rec("shares_outstanding", 94.0, date(2023, 12, 31), None),
     ]
-    y = _resolve_net_buyback_yield(
-        _store(tmp_path, recs), T, KnowledgeDate(date(2024, 6, 1))
-    )
+    y = _resolve_net_buyback_yield(_store(tmp_path, recs), T, KnowledgeDate(date(2024, 6, 1)))
     assert 0.025 < y < 0.035
 
 
@@ -161,9 +159,10 @@ def test_net_buyback_yield_dilution_is_zero(tmp_path: Path) -> None:
         _rec("shares_outstanding", 100.0, date(2022, 12, 31), None),
         _rec("shares_outstanding", 110.0, date(2023, 12, 31), None),
     ]
-    assert _resolve_net_buyback_yield(
-        _store(tmp_path, recs), T, KnowledgeDate(date(2024, 6, 1))
-    ) == 0.0
+    assert (
+        _resolve_net_buyback_yield(_store(tmp_path, recs), T, KnowledgeDate(date(2024, 6, 1)))
+        == 0.0
+    )
 
 
 def _annual_records(end: date, scale: dict[str, float]) -> list[PITRecord]:
@@ -172,14 +171,26 @@ def _annual_records(end: date, scale: dict[str, float]) -> list[PITRecord]:
 
 
 _GOOD_NEW = {
-    "revenue": 1200.0, "net_income": 150.0, "operating_income": 240.0,
-    "operating_cash_flow": 200.0, "assets": 1000.0, "long_term_debt": 100.0,
-    "cash": 200.0, "liabilities": 500.0, "shares_outstanding": 95.0,
+    "revenue": 1200.0,
+    "net_income": 150.0,
+    "operating_income": 240.0,
+    "operating_cash_flow": 200.0,
+    "assets": 1000.0,
+    "long_term_debt": 100.0,
+    "cash": 200.0,
+    "liabilities": 500.0,
+    "shares_outstanding": 95.0,
 }
 _OLD = {
-    "revenue": 1000.0, "net_income": 80.0, "operating_income": 150.0,
-    "operating_cash_flow": 120.0, "assets": 1000.0, "long_term_debt": 200.0,
-    "cash": 100.0, "liabilities": 600.0, "shares_outstanding": 100.0,
+    "revenue": 1000.0,
+    "net_income": 80.0,
+    "operating_income": 150.0,
+    "operating_cash_flow": 120.0,
+    "assets": 1000.0,
+    "long_term_debt": 200.0,
+    "cash": 100.0,
+    "liabilities": 600.0,
+    "shares_outstanding": 100.0,
 }
 
 

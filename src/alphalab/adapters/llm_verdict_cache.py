@@ -46,8 +46,7 @@ def compute_request_fingerprint(
     safe_price = max(float(request.current_price), 0.01)
     price_bucket = round(math.log(safe_price) / bucket_step)
     estimates = sorted(
-        (str(e.operator), round(float(e.value), 4))
-        for e in request.valuation.estimates
+        (str(e.operator), round(float(e.value), 4)) for e in request.valuation.estimates
     )
     payload = {
         "ticker": str(request.ticker).upper(),
@@ -76,9 +75,7 @@ class LlmVerdictCache:
         with contextlib.suppress(Exception):
             raw = json.loads(self._path.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
-                self._entries = {
-                    str(k): v for k, v in raw.items() if isinstance(v, dict)
-                }
+                self._entries = {str(k): v for k, v in raw.items() if isinstance(v, dict)}
 
     def get(self, fingerprint: str) -> EquityResearchArtifact | None:
         """Return the cached artifact for ``fingerprint``, or ``None``."""

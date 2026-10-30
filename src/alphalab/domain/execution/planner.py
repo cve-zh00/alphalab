@@ -54,13 +54,9 @@ def plan_trades(
 
     rules = limits or RiskLimits()
     rejected: list[RejectedOrder] = []
-    capped = _cap_targets(
-        targets, rules, rejected, holdings=holdings, equity=equity, prices=prices
-    )
+    capped = _cap_targets(targets, rules, rejected, holdings=holdings, equity=equity, prices=prices)
     capped = _cap_gross(capped, rules, rejected)
-    capped = _apply_rebalance_band(
-        capped, rules, holdings=holdings, equity=equity, prices=prices
-    )
+    capped = _apply_rebalance_band(capped, rules, holdings=holdings, equity=equity, prices=prices)
 
     intents: list[OrderIntent] = []
     for ticker in sorted(set(capped) | set(holdings)):

@@ -431,4 +431,3 @@ class TestInsufficientData:
         for text in result.request.documents:
             body = text.split("] ", 1)[-1]
             assert not any(ch.isdigit() for ch in body)
-

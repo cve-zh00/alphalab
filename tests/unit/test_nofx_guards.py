@@ -413,4 +413,3 @@ class TestSectorCap:
         assert res.targets[Ticker("NEW2")] == pytest.approx(0.05)
         assert Ticker("NEW3") not in res.targets
         assert sum(res.targets.values()) == pytest.approx(1.0)
-

@@ -114,4 +114,3 @@ class TestRunMetadata:
         assert len(calls) == 2
         assert calls[0] is None
         assert calls[1] is not None
-

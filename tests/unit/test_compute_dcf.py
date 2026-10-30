@@ -219,4 +219,3 @@ class TestDcfValuePerShare:
         assert 0.40 <= beta <= 2.20
         capm_ke = compute_capm_cost_of_equity(beta=beta)
         assert 0.065 <= capm_ke <= 0.145
-

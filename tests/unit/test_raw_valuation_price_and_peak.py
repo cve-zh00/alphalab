@@ -130,4 +130,3 @@ def test_peak_uses_live_intraday_high_and_persists_memory(tmp_path) -> None:
         peak_memory=memory,
     )
     assert r2[ual].peak_price == pytest.approx(104.97)
-

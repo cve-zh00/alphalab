@@ -304,4 +304,3 @@ def _format_filing_disclosure(form: str, filed_on: date, items_csv: str) -> str:
     if form == "10-Q":
         return f"{prefix} Quarterly Report (Form 10-Q) filed with the SEC."
     return f"{prefix} Annual Report (Form 10-K) filed with the SEC."
-

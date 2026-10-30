@@ -342,4 +342,3 @@ class TestHighLowAndRawClose:
 
         assert highs == {Ticker("UAL"): 104.97, Ticker("IT"): 221.46}
         assert client.intraday_highs([]) == {}
-

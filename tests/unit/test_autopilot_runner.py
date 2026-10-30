@@ -380,5 +380,3 @@ def test_require_market_open_blocks_closed_market_and_aligns_pre_open_sleep(
         "next_close": "2024-06-10T20:00:00Z",
     }
     assert runner._next_sleep_seconds(3600.0, True) == 1800.0
-
-

@@ -38,9 +38,7 @@ class _FakeTransport:
                 return resp
         return HttpResponse(status_code=200, json=[])
 
-    def post(
-        self, url: str, *, headers: dict[str, str], json: dict[str, object]
-    ) -> HttpResponse:
+    def post(self, url: str, *, headers: dict[str, str], json: dict[str, object]) -> HttpResponse:
         return HttpResponse(status_code=200, json={})
 
 

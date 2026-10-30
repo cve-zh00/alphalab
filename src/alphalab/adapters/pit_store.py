@@ -7,7 +7,7 @@ the anti-leakage filter. The ``observed_at <= knowledge_date`` predicate is
 applied inside the SQL (as a bound parameter), not by the caller.
 
 All value filters use DuckDB ``?`` placeholders — never string interpolation —
-per the BICE anti-injection guideline. The only interpolated token is the
+per the SQL anti-injection guideline. The only interpolated token is the
 Parquet glob path, which is derived from a validated store root.
 """
 

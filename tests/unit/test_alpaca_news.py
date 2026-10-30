@@ -160,8 +160,7 @@ def test_edgar_recent_filing_disclosures_filters_pit_and_maps_8k_items() -> None
     assert len(disclosures) == 3
     assert "2026-10-20" not in " ".join(disclosures)
     assert (
-        disclosures[0]
-        == "[SEC EDGAR 8-K filed 2026-09-10] Current Report disclosures: "
+        disclosures[0] == "[SEC EDGAR 8-K filed 2026-09-10] Current Report disclosures: "
         "Results of Operations and Financial Condition; "
         "Departure or Election of Directors or Principal Officers."
     )

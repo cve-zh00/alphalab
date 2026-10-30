@@ -110,16 +110,12 @@ class OllamaLLMAdapter:
 
     def extract(self, request: ExtractionRequest) -> tuple[QualitativeFinding, ...]:
         """Extract qualitative findings via the quick-think agent."""
-        prompt = self._extraction_prompt(
-            request, anonymize=self._settings.anonymize_ticker
-        )
+        prompt = self._extraction_prompt(request, anonymize=self._settings.anonymize_ticker)
         return tuple(self._run_with_retry(self._quick_agent, prompt))
 
     def narrate(self, request: NarrationRequest) -> ThesisNarrative:
         """Synthesise the thesis narrative via the deep-think agent."""
-        prompt = self._narration_prompt(
-            request, anonymize=self._settings.anonymize_ticker
-        )
+        prompt = self._narration_prompt(request, anonymize=self._settings.anonymize_ticker)
         return self._run_with_retry(self._deep_agent, prompt)
 
     def _run_with_retry(self, agent: Agent[None, object], prompt: str) -> object:  # type: ignore[type-var]

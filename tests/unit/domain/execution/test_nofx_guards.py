@@ -121,9 +121,7 @@ class TestSlotCeilingAndSectorCapOrdering:
         assert guarded.targets[Ticker("YYY")] == pytest.approx(0.10)
         assert Ticker("AAA") not in guarded.targets
         tech_tickers = {Ticker("AAA"), Ticker("YYY"), Ticker("ZZZ")}
-        tech_total = sum(
-            w for t, w in guarded.targets.items() if t in tech_tickers
-        )
+        tech_total = sum(w for t, w in guarded.targets.items() if t in tech_tickers)
         assert tech_total <= 0.25 + 1e-9
         assert any(a.kind is GuardActionKind.SECTOR_CAP_BLOCKED for a in guarded.actions)
 

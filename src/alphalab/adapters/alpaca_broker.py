@@ -268,9 +268,7 @@ class AlpacaBroker:
                 continue
             filled_qty = _as_float(row.get("filled_qty"))
             filled_avg_price = _as_float(row.get("filled_avg_price"))
-            filled_at = _as_datetime(row.get("filled_at")) or _as_datetime(
-                row.get("updated_at")
-            )
+            filled_at = _as_datetime(row.get("filled_at")) or _as_datetime(row.get("updated_at"))
             if filled_qty <= 0.0 or filled_avg_price <= 0.0 or filled_at is None:
                 continue
             coid = row.get("client_order_id")

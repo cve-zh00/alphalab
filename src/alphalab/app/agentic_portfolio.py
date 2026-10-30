@@ -369,4 +369,3 @@ def _apply_sector_cap(
         if sector and totals[sector] > cap:
             out[t] = w * cap / totals[sector]
     return out
-
