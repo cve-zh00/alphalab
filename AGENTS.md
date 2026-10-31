@@ -81,6 +81,7 @@ Invoke or consult these skills when working on their respective domains:
 | **`pit-valuation-modeling`** | `.claude/skills/pit-valuation-modeling/SKILL.md` | Adding or modifying SEC EDGAR XBRL concepts, Point-in-Time DuckDB queries, DCF/DDM/Residual Income/Graham operators, Levi-Welch $\beta_{ke}$, or `ContractGate` clauses (`C0`–`C2`). |
 | **`nofx-execution-and-risk`** | `.claude/skills/nofx-execution-and-risk/SKILL.md` | Modifying NOFX runtime risk guards, Dykstra alternating projection, Lot-1 stop-loss anchoring, Ornstein-Uhlenbeck convergence exits, or Alpaca order routing. |
 | **`live-performance-benchmark`** | `.claude/skills/live-performance-benchmark/SKILL.md` | Auditing live Alpaca Paper/Live PnL from the true agentic inception baseline vs. ETFs (`SPY`, `QQQ`, `DIA`, `IWM`, `RSP`, `VTV`, `VUG`) and non-agentic baselines (`nofx_agentic`, `rank_ensemble`). |
+| **`alpharesearch-committee`** | `.claude/skills/alpharesearch-committee/SKILL.md` | Running the weekly 3-role AlphaResearch committee (`alphalab alpharesearch run`) across `reference/`, GitHub, `arXiv q-fin`, and `execution.db` postmortems to emit a certified `plan.md`. |
 
 ### Custom Agents (`.github/agents/`)
 
@@ -89,6 +90,7 @@ Invoke or consult these skills when working on their respective domains:
 | **`quant-auditor`** | `.github/agents/quant-auditor.agent.md` | Institutional 7-pillar methodology review, citation verification, and exposure/calibration diagnostics. |
 | **`valuation-specialist`** | `.github/agents/valuation-specialist.agent.md` | Fundamental valuation math (`DCF`, `DDM`, `Residual Income`, `Graham`, `Piotroski`), PIT EDGAR ingestion, and `ContractGate` invariants. |
 | **`execution-risk-guardian`** | `.github/agents/execution-risk-guardian.agent.md` | NOFX runtime risk guards, Dykstra convex projection, stop-loss mechanics, and Alpaca execution safety. |
+| **`alpharesearch-committee`** | `.github/agents/alpharesearch-committee.agent.md` | Weekly R&D discovery & 3-role discernment pipeline (`ScoutProposer` → `SkepticReviewer` → `EmpiricalGatekeeper`). |
 
 ---
 

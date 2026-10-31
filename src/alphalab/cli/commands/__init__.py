@@ -8,6 +8,14 @@ Argument parsing lives in :mod:`alphalab.cli.app`; these runners never parse
 
 from __future__ import annotations
 
+from alphalab.cli.commands.alpharesearch import (
+    AlphaResearchHistoryOptions,
+    AlphaResearchRunOptions,
+    build_alpharesearch_parser,
+    dispatch_alpharesearch,
+    run_alpharesearch_history,
+    run_alpharesearch_run,
+)
 from alphalab.cli.commands.autopilot import (
     AutopilotCycleOptions,
     AutopilotPreflightOptions,
@@ -33,6 +41,8 @@ from alphalab.cli.commands.schedule import ScheduleOptions, run_schedule_generat
 from alphalab.cli.commands.settle import SettleOptions, run_settle
 
 __all__ = [
+    "AlphaResearchHistoryOptions",
+    "AlphaResearchRunOptions",
     "AutopilotCycleOptions",
     "AutopilotPreflightOptions",
     "CalibrationOptions",
@@ -45,6 +55,10 @@ __all__ = [
     "ResearchOptions",
     "ScheduleOptions",
     "SettleOptions",
+    "build_alpharesearch_parser",
+    "dispatch_alpharesearch",
+    "run_alpharesearch_history",
+    "run_alpharesearch_run",
     "run_autopilot_loop",
     "run_autopilot_preflight",
     "run_autopilot_run",

@@ -171,6 +171,18 @@ uv run alphalab calibration
 uv run alphalab journal
 ```
 
+### Weekly AlphaResearch Committee & Discernment Pipeline
+
+```bash
+# Scan local reference/ repos, remote GitHub repos, arXiv q-fin papers & live postmortems,
+# filter proposals through the 3-role committee (Scout -> Skeptic -> Empirical Gatekeeper),
+# and emit a certified plan.md
+uv run alphalab alpharesearch run
+
+# View history of weekly committee runs, promoted proposals, and cumulative n_trials
+uv run alphalab alpharesearch history
+```
+
 ---
 
 ## Development & Testing

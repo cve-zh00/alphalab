@@ -33,6 +33,8 @@ from alphalab.cli.commands import (
     ResearchOptions,
     ScheduleOptions,
     SettleOptions,
+    build_alpharesearch_parser,
+    dispatch_alpharesearch,
     run_autopilot_run,
     run_autopilot_status,
     run_calibration,
@@ -114,6 +116,12 @@ def build_parser() -> argparse.ArgumentParser:
     _build_doctor_parser(sub)
     _build_paper_parser(sub)
     build_autopilot_parser(sub)
+    build_alpharesearch_parser(
+        sub,
+        project_root=_project_root(),
+        default_execution_db=_DEFAULT_EXECUTION_DB,
+        default_journal_db=_DEFAULT_DB,
+    )
     _build_run_cadence_parser(sub)
     return parser
 
@@ -561,6 +569,8 @@ def main(
         return _dispatch_paper(args, out=out, err=err, no_color=no_color)
     if args.command == "autopilot":
         return dispatch_autopilot(args, out=out, err=err, no_color=no_color)
+    if args.command == "alpharesearch":
+        return dispatch_alpharesearch(args, out=out, err=err, no_color=no_color)
     if args.command == "_run-cadence":
         from alphalab.cli.commands.run_cadence import run_cadence
 
