@@ -90,7 +90,7 @@ Every autonomous trading cycle and weekly research review follows a deterministi
    - **No-Trade Inertia Band (`2.5%`):** Suppresses low-value rebalancing churn inside the neutral zone.
 
 ### Step 5 — NOFX Runtime Risk Guards & Idempotent Execution
-1. **Lot-1 Anchored Volatility Stop-Loss:** Every open position carries a dynamic stop-loss scaled to $3\sigma_{20\text{d}} \in [-12\%, -6\%]$, anchored to its initial entry price so subsequent top-ups never lower the dollar protection floor.
+1. **Lot-1 Anchored Forward-Volatility Stop-Loss (`Bollerslev 1986; Engle & Mezrich 1996`):** Every open position carries a dynamic stop-loss scaled to $3.5\,\hat{\sigma}_{\text{GARCH}(1,1),\text{daily}} \in [-12\%, -6\%]$ using a pure variance-targeted `GARCH(1,1)` 10-day forward volatility estimator (`domain/compute/volatility.py`), anchored to its initial entry price so subsequent top-ups never lower the dollar protection floor.
 2. **Intraday High-Water Mark & Ornstein-Uhlenbeck Exits (`Leung & Li 2015`):** Using real-time Alpaca `IEX` intraday highs (`dailyBar.h`) and persistent SQLite peak tracking, positions that arm above `+3%` and give back $\ge 30\%$ of peak gains (or converge within `2%` of intrinsic fair value) trigger an immediate `[DRAWDOWN_EXIT]`.
 3. **Cooldown & Sell-Before-Buy Routing:** Exited symbols enter a 5-day cooldown (`execution.db`) to prevent whipsaw re-entry. Planned trades are routed with deterministic `client_order_id` keys, executing all `SELL` orders before `BUY` orders.
 
@@ -114,7 +114,7 @@ src/alphalab/
 ├── domain/          # Pure domain logic (zero I/O, zero framework dependencies)
 │   ├── analyst/     # Qualitative extraction & thesis contracts
 │   ├── backtest/    # Walk-forward engine, signals, turbulence & shadow benchmark
-│   ├── compute/     # DCF, DDM, Residual Income, Graham, Piotroski, GICS sectors & betas
+│   ├── compute/     # DCF, DDM, Residual Income, Graham, Piotroski, GARCH(1,1) vol, GICS & betas
 │   ├── contract/    # Hard pre-verdict gates (C0 plausibility, C1 provenance, C1b, C2)
 │   ├── costs/       # Spread, Almgren-Chriss impact & capacity models
 │   ├── debate/      # Multi-agent Bull / Bear / Judge debate conductor

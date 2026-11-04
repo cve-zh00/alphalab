@@ -51,6 +51,10 @@ from alphalab.domain.compute.provenance import (
     leaf,
     provenanced,
 )
+from alphalab.domain.compute.volatility import (
+    GarchVolatilityForecast,
+    forecast_garch11_volatility,
+)
 
 __all__ = [
     # Audit
@@ -58,6 +62,7 @@ __all__ = [
     # Errors
     "ComputeError",
     "ConsensusRange",
+    "GarchVolatilityForecast",
     "GrowthExceedsDiscountError",
     "InvalidValuationInputError",
     "ProvenanceDepthError",
@@ -75,6 +80,7 @@ __all__ = [
     "ev_bridge_check",
     "ev_ebitda_implied_value",
     "ffo_implied_value",
+    "forecast_garch11_volatility",
     "leaf",
     "magnitude_sanity",
     "pb_implied_value",
