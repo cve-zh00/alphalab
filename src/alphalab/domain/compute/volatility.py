@@ -196,13 +196,18 @@ def forecast_garch11_volatility(
 
     alpha, beta = _fit_qml_alpha_beta(r2, v_full)
     persistence = alpha + beta
-    omega = v_target * (1.0 - persistence)
 
-    # Filter conditional variance forward across the trailing target window
-    s2 = v_target
-    filter_slice = r2[-min(n_obs, max(60, target_window)) :]
-    for x in filter_slice:
-        s2 = omega + alpha * float(x) + beta * s2
+    # Strictly causal expanding/rolling variance targeting inside the recursion:
+    # at each bar tau, omega_tau uses only data observed up to tau (never future bars).
+    warmup = min(20, n_obs)
+    s2 = float(np.mean(r2[:warmup]))
+    w_len = max(20, target_window)
+    for tau in range(warmup, n_obs):
+        start_tau = max(0, tau - w_len)
+        local_uncond = float(np.mean(r2[start_tau:tau]))
+        omega_tau = local_uncond * (1.0 - persistence)
+        s2 = omega_tau + alpha * float(r2[tau]) + beta * s2
+    omega = v_target * (1.0 - persistence)
 
     scale = (
         (1.0 - persistence**horizon_days) / (horizon_days * (1.0 - persistence))
