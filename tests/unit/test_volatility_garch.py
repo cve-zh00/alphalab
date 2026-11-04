@@ -62,6 +62,19 @@ def test_garch11_zero_variance_series_returns_zero_forecast() -> None:
     assert fc.unconditional_volatility == 0.0
 
 
+def test_garch11_incorporates_parkinson_high_low_intraday_range() -> None:
+    rng = np.random.default_rng(99)
+    rets = list(rng.normal(0.0, 0.005, size=80))
+    wide_intraday = [1.04] * 80  # 4% intraday high/low range despite small close-to-close moves
+
+    fc_close = forecast_garch11_volatility(rets, horizon_days=10)
+    fc_range = forecast_garch11_volatility(
+        rets, high_low_ratios=wide_intraday, horizon_days=10
+    )
+
+    assert fc_range.annualized_volatility > fc_close.annualized_volatility * 1.5
+
+
 def test_garch11_rejects_invalid_inputs() -> None:
     with pytest.raises(InvalidValuationInputError):
         forecast_garch11_volatility([0.01])

@@ -738,23 +738,39 @@ def _overlay_live_bars(
 def _volatilities_60d(
     bars: Mapping[Ticker, Sequence[PriceBar]], as_of: date
 ) -> dict[Ticker, float]:
-    """Compute forward annualized volatility via Variance-Targeted GARCH(1,1).
+    """Compute forward annualized volatility via Variance-Targeted Range-GARCH(1,1).
 
-    Uses up to 252 trailing closes for QML estimation with a 126-day variance
-    target and 10-day forward horizon, falling back to trailing sample stdev
-    when fewer than 60 daily returns are available.
+    Uses up to 252 trailing bars (including intraday ``high/low`` Parkinson
+    range when available on ``PriceBar``) with a strictly causal 126-day
+    variance target and 10-day forward horizon, falling back to trailing sample
+    stdev when fewer than 60 daily returns are available.
     """
     from alphalab.domain.compute.volatility import forecast_garch11_volatility
 
     out: dict[Ticker, float] = {}
     for ticker, series in bars.items():
-        window = [b.close for b in series if b.on <= as_of and b.close > 0.0][-253:]
+        window = [b for b in series if b.on <= as_of and b.close > 0.0][-253:]
         if len(window) < 10:
             continue
-        rets = [window[i] / window[i - 1] - 1.0 for i in range(1, len(window))]
+        rets = [window[i].close / window[i - 1].close - 1.0 for i in range(1, len(window))]
+        hl_ratios: list[float | None] = [
+            (
+                window[i].high / window[i].low  # type: ignore[operator]
+                if window[i].high is not None
+                and window[i].low is not None
+                and window[i].low > 0.0  # type: ignore[operator]
+                and window[i].high >= window[i].low  # type: ignore[operator]
+                else None
+            )
+            for i in range(1, len(window))
+        ]
         if len(rets) >= 2:
             out[ticker] = forecast_garch11_volatility(
-                rets, horizon_days=10, min_garch_obs=60, as_of=as_of
+                rets,
+                high_low_ratios=hl_ratios,
+                horizon_days=10,
+                min_garch_obs=60,
+                as_of=as_of,
             ).annualized_volatility
     return out
 
@@ -762,17 +778,20 @@ def _volatilities_60d(
 def _residual_volatilities_60d(
     bars: Mapping[Ticker, Sequence[PriceBar]], as_of: date
 ) -> dict[Ticker, float]:
-    """Compute 60-day annualized residual (idiosyncratic) volatility vs SPY.
+    """Compute annualized residual (idiosyncratic) forward volatility vs SPY.
 
     Following Baker, Bradley & Wurgler (2011, FAJ), sizing by total volatility
     $\\sqrt{\\beta_i^2 \\sigma_m^2 + \\sigma_{\\varepsilon,i}^2}$ mechanically
     penalizes market beta and crowds the portfolio into low-beta bond proxies.
     Residual volatility $\\sigma_{\\varepsilon,i}$ makes conviction/volatility
-    sizing invariant to market beta. Falls back to total volatility when SPY
-    bars are unavailable.
+    sizing invariant to market beta, forecasted over the 21-day holding horizon
+    via causal Variance-Targeted GARCH(1,1). Falls back to total volatility
+    when SPY bars are unavailable.
     """
+    from alphalab.domain.compute.volatility import forecast_garch11_volatility
+
     total_vols = _volatilities_60d(bars, as_of)
-    spy_series = [b for b in bars.get(_SPY, ()) if b.on <= as_of and b.close > 0.0][-61:]
+    spy_series = [b for b in bars.get(_SPY, ()) if b.on <= as_of and b.close > 0.0][-127:]
     if len(spy_series) < 16:
         return total_vols
     spy_rets = {
@@ -783,7 +802,7 @@ def _residual_volatilities_60d(
     for ticker, series in bars.items():
         if ticker == _SPY:
             continue
-        window = [b for b in series if b.on <= as_of and b.close > 0.0][-61:]
+        window = [b for b in series if b.on <= as_of and b.close > 0.0][-127:]
         if len(window) < 16:
             continue
         asset_rets = {
@@ -804,7 +823,10 @@ def _residual_volatilities_60d(
         alpha_hat = mean_i - beta_hat * mean_m
         resids = [x - alpha_hat - beta_hat * y for x, y in zip(ri, rm, strict=True)]
         if len(resids) >= 2:
-            out[ticker] = max(0.05, statistics.stdev(resids) * math.sqrt(252.0))
+            resid_vol = forecast_garch11_volatility(
+                resids, horizon_days=21, min_garch_obs=60, as_of=as_of
+            ).annualized_volatility
+            out[ticker] = max(0.05, resid_vol)
     return out
 
 

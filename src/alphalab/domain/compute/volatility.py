@@ -113,6 +113,7 @@ def _fit_qml_alpha_beta(r2: NDArray[np.float64], v_uncond: float) -> tuple[float
 def forecast_garch11_volatility(
     returns: Sequence[float],
     *,
+    high_low_ratios: Sequence[float | None] | None = None,
     horizon_days: int = DEFAULT_GARCH_HORIZON_DAYS,
     target_window: int = DEFAULT_GARCH_TARGET_WINDOW,
     min_garch_obs: int = DEFAULT_GARCH_MIN_OBS,
@@ -121,8 +122,11 @@ def forecast_garch11_volatility(
 ) -> GarchVolatilityForecast:
     """Forecast annualized forward volatility over ``horizon_days`` via GARCH(1,1).
 
-    When ``len(returns) < min_garch_obs``, gracefully falls back to sample
-    realized standard deviation so callers with short price windows never fail.
+    When ``high_low_ratios`` (intraday ``high / low`` per bar) are supplied,
+    blends squared close-to-close returns with Parkinson (1980) intraday range
+    variance :math:`(\\ln(H_t/L_t))^2 / (4\\ln 2)` (Range-GARCH, Brandt & Jones
+    2006). When ``len(returns) < min_garch_obs``, gracefully falls back to
+    sample realized standard deviation.
     """
     if len(returns) < 2:
         raise InvalidValuationInputError("forecast_garch11_volatility requires >= 2 daily returns")
@@ -171,6 +175,22 @@ def forecast_garch11_volatility(
 
     arr = np.asarray(clean, dtype=np.float64)
     r2 = arr * arr
+    if high_low_ratios is not None and len(high_low_ratios) == len(returns):
+        inv_4ln2 = 1.0 / (4.0 * math.log(2.0))
+        blended: list[float] = []
+        for idx, r_val in enumerate(returns):
+            if not math.isfinite(r_val):
+                continue
+            c_r2 = float(r2[len(blended)])
+            hl = high_low_ratios[idx]
+            if hl is not None and math.isfinite(hl) and hl > 1.0:
+                log_hl = min(max_abs_daily_return * 1.5, math.log(hl))
+                park_var = (log_hl * log_hl) * inv_4ln2
+                blended.append(0.5 * c_r2 + 0.5 * park_var)
+            else:
+                blended.append(c_r2)
+        if len(blended) == n_obs:
+            r2 = np.asarray(blended, dtype=np.float64)
     v_full = float(np.mean(r2))
     v_target = float(np.mean(r2[-min(n_obs, max(20, target_window)) :]))
     if v_full <= 1e-12 or v_target <= 1e-12:
