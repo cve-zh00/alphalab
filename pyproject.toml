@@ -2,6 +2,7 @@
 name = "alphalab"
 version = "0.1.0"
 description = "Alphalab research and backtesting lab"
+license = { file = "LICENSE" }
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2",

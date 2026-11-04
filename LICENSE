@@ -1,0 +1,45 @@
+Alphalab Non-Commercial License (NC-1.0)
+
+Copyright (c) 2026 cve-zh00. All rights reserved.
+
+1. Grant of Non-Commercial License
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software, quantitative models, prompts, and associated documentation files
+(collectively, the "Software"), to use, copy, modify, and distribute the
+Software strictly for NON-COMMERCIAL, personal, academic, or educational
+research purposes, subject to the conditions set forth herein.
+
+2. Prohibited Commercial Uses
+Without prior written permission and a separate commercial license from the
+copyright holder, you MAY NOT use the Software, in whole or in part, for any
+commercial purpose, including but not limited to:
+  (a) Operating, advising, or managing capital for third parties, investment
+      funds, prop-trading firms, family offices, or commercial entities;
+  (b) Offering the Software or any derivative work as a hosted service (SaaS),
+      API, signal-provider service, paid newsletter, or commercial product;
+  (c) Selling, licensing, sublicensing, or otherwise monetizing the Software
+      or its generated research artifacts, signals, or trade plans; or
+  (d) Using the Software within a for-profit organization's internal business,
+      research, or trading operations.
+
+3. Attribution and Redistribution
+The above copyright notice, this permission notice, and the disclaimers below
+shall be included in all copies or substantial portions of the Software and any
+derivative works. Any distributed modifications must remain bound by the terms
+of this Non-Commercial License.
+
+4. No Investment Advice & Financial Risk Disclaimer
+THE SOFTWARE IS FOR RESEARCH AND EDUCATIONAL PURPOSES ONLY AND DOES NOT
+CONSTITUTE FINANCIAL, INVESTMENT, LEGAL, OR TAX ADVICE. Quantitative models,
+intrinsic valuations, statistical certifications, and language-model outputs
+can and do contain errors. Trading securities involves substantial risk of
+loss, including the potential loss of all invested capital.
+
+5. Disclaimer of Warranty & Limitation of Liability
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, ACCURACY, AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES,
+TRADING LOSSES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR
+OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE
+OR OTHER DEALINGS IN THE SOFTWARE.

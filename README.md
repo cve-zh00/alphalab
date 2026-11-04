@@ -253,3 +253,13 @@ make check
 # Run acceptance ("acid") certification tests
 make acid-test
 ```
+
+---
+
+## License
+
+Copyright (c) 2026 `cve-zh00`.
+
+This project is licensed under the **Alphalab Non-Commercial License (`LICENSE`)**.  
+Use, modification, and distribution are permitted **strictly for non-commercial, personal, academic, or educational research purposes**. Any commercial use—including managing third-party capital, institutional/prop-trading deployment, or offering the software/signals as a paid service—is prohibited without prior written authorization. See [`LICENSE`](./LICENSE) for full terms and financial risk disclaimers.
+
