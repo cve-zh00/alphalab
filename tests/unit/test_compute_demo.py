@@ -72,12 +72,13 @@ class TestThreeMethodConsensusDemo:
             unit="USD_per_share",
         )
 
-        # Assert: point = median(30.0, 31.2, 32.2078) = 31.2.
-        assert result.mid == pytest.approx(31.2)
+        # Assert: family-balanced point = 0.5 * (median(32.2078, 31.2) + 30.0) = 30.851948...
+        expected_mid = 0.5 * (0.5 * (32.2077922077922 + 31.2) + 30.0)
+        assert result.mid == pytest.approx(expected_mid)
         assert result.low == pytest.approx(30.0)
         assert result.high == pytest.approx(32.2077922077922)
-        # span = (32.2078 - 30.0) / 31.2 = 0.070762...
-        assert result.relative_span == pytest.approx((32.2077922077922 - 30.0) / 31.2)
+        # span = (32.2078 - 30.0) / expected_mid
+        assert result.relative_span == pytest.approx((32.2077922077922 - 30.0) / expected_mid)
         assert result.is_wide is False
 
         # Assert: the consensus point traces all the way to its leaves, and the

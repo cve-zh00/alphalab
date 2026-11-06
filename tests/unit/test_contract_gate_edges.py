@@ -82,7 +82,22 @@ class TestDegradeBuildsRangeFromMethods:
         assert out.price_target is None
         assert out.price_range is not None
         assert out.price_range.low == 120.0
+        assert out.price_range.mid == pytest.approx(0.5 * (135.0 + 200.0))
         assert out.price_range.high == 200.0
+
+    def test_c1b_range_mid_balances_1_intrinsic_against_3_multiples(self) -> None:
+        art = _artifact(
+            price_target=PriceTarget(value=160.0, unit="USD_per_share"),
+            methods_used=("dcf", "pe", "ev_ebitda", "pb"),
+            consensus_relative_span=0.9,
+            price_range=None,
+            method_values={"dcf": 100.0, "pe": 200.0, "ev_ebitda": 220.0, "pb": 240.0},
+        )
+        out = gate.enforce_contract(art).artifact
+        assert out.price_range is not None
+        assert out.price_range.low == 100.0
+        assert out.price_range.mid == pytest.approx(160.0)
+        assert out.price_range.high == 240.0
 
     def test_no_range_and_no_methods_leaves_range_none(self) -> None:
         art = _artifact(

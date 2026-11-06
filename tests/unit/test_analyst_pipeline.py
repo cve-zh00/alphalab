@@ -105,8 +105,8 @@ class TestAssembly:
         assert narrator.last_request is not None
         summary = dict(narrator.last_request.valuation_summary)
         assert "consensus_mid" in summary
-        # The number handed to the model is the code-computed median.
-        assert summary["consensus_mid"] == 42.0
+        # The number handed to the model is the code-computed family-balanced consensus.
+        assert summary["consensus_mid"] == 42.5
 
 
 class TestNoNumberInjection:
@@ -156,7 +156,7 @@ class TestDemo:
         # (a) target == consensus and traceable to leaf inputs.
         expected = consensus(estimates=request.valuation.estimates, unit="USD_per_share")
         assert artifact.price_target is not None
-        assert artifact.price_target.value == expected.mid == 42.0
+        assert artifact.price_target.value == expected.mid == 42.5
         point = result.consensus.point
         leaves = point.leaves()
         assert len(leaves) == 3

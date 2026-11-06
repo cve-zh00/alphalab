@@ -21,6 +21,7 @@ from collections.abc import Callable
 
 from alphalab.artifact.models import EquityResearchArtifact, PriceRange
 from alphalab.domain.compute import AuditFinding, Severity
+from alphalab.domain.compute.operators.consensus import family_balanced_midpoint
 from alphalab.domain.contract import clauses
 from alphalab.domain.contract._text import scrub_amount
 from alphalab.domain.contract.thresholds import PRICE_TEXT_DECIMALS
@@ -206,12 +207,13 @@ def _degrade_to_range(
 
 def _range_from_methods(artifact: EquityResearchArtifact) -> PriceRange | None:
     """Build a low/mid/high range from per-method values, if any exist."""
-    values = [v for v in artifact.method_values.values() if math.isfinite(v)]
-    if not values:
+    finite_pairs = [(k, v) for k, v in artifact.method_values.items() if math.isfinite(v)]
+    if not finite_pairs:
         return None
+    values = [v for _, v in finite_pairs]
     low = min(values)
     high = max(values)
-    mid = sorted(values)[len(values) // 2]
+    mid = family_balanced_midpoint(finite_pairs)
     return PriceRange(low=low, mid=mid, high=high)
 
 

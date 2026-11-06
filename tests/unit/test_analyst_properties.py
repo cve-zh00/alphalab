@@ -65,13 +65,13 @@ def test_target_always_equals_computed_consensus(v1: float, v2: float, v3: float
         ),
         unit="USD_per_share",
     )
-    # Use the median as the reference price so the C1 upside band never fires;
+    expected = consensus(estimates=bundle.estimates, unit="USD_per_share")
+    # Use the consensus mid as the reference price so the C1 upside band never fires;
     # this isolates the assembly-determinism property from the gate.
-    median = sorted((v1, v2, v3))[1]
     request = AnalystRequest(
         ticker="SYNTH",
         knowledge_date=date(2025, 1, 15),
-        current_price=median,
+        current_price=expected.mid,
         documents=("doc",),
         valuation=bundle,
         run_metadata=RunMetadata(
@@ -88,7 +88,6 @@ def test_target_always_equals_computed_consensus(v1: float, v2: float, v3: float
         narrator=StubNarrator(verdict=Verdict.HOLD),
         store=InMemoryArtifactStore(),
     )
-    expected = consensus(estimates=bundle.estimates, unit="USD_per_share")
     result = pipeline.run(request)
     assert result.consensus.mid == expected.mid
     if result.artifact.price_target is not None:

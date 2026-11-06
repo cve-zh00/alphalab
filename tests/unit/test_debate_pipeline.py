@@ -100,7 +100,7 @@ class TestAssembly:
         judge = StubJudge()
         _pipeline(judge).run(_request())
         summary = dict(judge.requests[0].valuation_summary)
-        assert summary["consensus_mid"] == 42.0
+        assert summary["consensus_mid"] == 42.5
 
 
 class TestNoNumberInjection:
@@ -150,7 +150,7 @@ class TestDemo:
         # (c) the artifact target is the consensus point and is traceable.
         expected = consensus(estimates=request.valuation.estimates, unit="USD_per_share")
         assert artifact.price_target is not None
-        assert artifact.price_target.value == expected.mid == 42.0
+        assert artifact.price_target.value == expected.mid == 42.5
         point = result.consensus.point
         leaves = point.leaves()
         assert len(leaves) == 3

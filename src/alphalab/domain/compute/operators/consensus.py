@@ -25,7 +25,65 @@ from alphalab.domain.compute.errors import InvalidValuationInputError
 from alphalab.domain.compute.provenance import ProvenancedValue, combine
 from alphalab.domain.compute.thresholds import CONSENSUS_WIDE_SPAN_THRESHOLD
 
-_CONSENSUS_VERSION = "1.0.0"
+_CONSENSUS_VERSION = "1.1.0"
+
+INTRINSIC_VALUATION_OPERATORS: frozenset[str] = frozenset(
+    {
+        "dcf_value_per_share",
+        "ddm_value_per_share",
+        "residual_income_value_per_share",
+        "graham_value_per_share",
+        "epv_value_per_share",
+        "dcf",
+        "ddm",
+        "residual_income",
+        "graham",
+        "epv",
+    }
+)
+
+RELATIVE_MULTIPLES_OPERATORS: frozenset[str] = frozenset(
+    {
+        "pe_implied_value",
+        "ev_ebitda_implied_value",
+        "pb_implied_value",
+        "ffo_implied_value",
+        "multiples_pe",
+        "multiples_ev_ebitda",
+        "multiples_pb",
+        "multiples_ffo",
+        "pe",
+        "ev_ebitda",
+        "pb",
+        "ffo",
+    }
+)
+
+
+def family_balanced_midpoint(pairs: Sequence[tuple[str, float]]) -> float:
+    """Compute a family-balanced consensus midpoint across valuation methods.
+
+    When both intrinsic valuation methods (DCF, DDM, Residual Income, ...) and
+    relative multiples methods (P/E, EV/EBITDA, P/B, P/FFO) are present with no
+    unclassified operators, each family first collapses to its own median and
+    the consensus midpoint is the 50/50 average (2-element median) of the two
+    family medians. This prevents 2-3 relative multiples from outvoting 1-2
+    intrinsic methods in flat median aggregation.
+    """
+    if len(pairs) == 0:
+        raise InvalidValuationInputError("estimates must be non-empty")
+    intrinsic = [val for op, val in pairs if op in INTRINSIC_VALUATION_OPERATORS]
+    relative = [val for op, val in pairs if op in RELATIVE_MULTIPLES_OPERATORS]
+    other = [
+        val
+        for op, val in pairs
+        if op not in INTRINSIC_VALUATION_OPERATORS and op not in RELATIVE_MULTIPLES_OPERATORS
+    ]
+    if intrinsic and relative and not other:
+        intrinsic_mid = float(np.median(np.asarray(intrinsic, dtype=float)))
+        relative_mid = float(np.median(np.asarray(relative, dtype=float)))
+        return 0.5 * (intrinsic_mid + relative_mid)
+    return float(np.median(np.asarray([val for _, val in pairs], dtype=float)))
 
 
 class ConsensusRange(BaseModel):
@@ -85,7 +143,7 @@ def consensus(
     values = np.asarray([e.value for e in estimates], dtype=float)
     low = float(np.min(values))
     high = float(np.max(values))
-    mid = float(np.median(values))
+    mid = family_balanced_midpoint([(e.operator, e.value) for e in estimates])
 
     denom = abs(mid)
     relative_span = (high - low) / denom if denom > 0.0 else 0.0
