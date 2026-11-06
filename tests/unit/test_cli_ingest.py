@@ -280,6 +280,57 @@ class TestMissingUserAgent:
         assert "Traceback" not in stderr
         assert "Traceback" not in out.getvalue()
 
+    def test_calibrated_assumptions_shrinks_toward_pit_sector_peers(self, tmp_path: Path) -> None:
+        from alphalab.adapters.pit_store import ParquetPITStore
+        from alphalab.domain.pit import PITRecord
+        from alphalab.domain.types import Ticker
+
+        pit_root = tmp_path / "pit"
+        prices_dir = tmp_path / "prices"
+        prices_dir.mkdir(parents=True, exist_ok=True)
+
+        it_peers = ("AAPL", "MSFT", "NVDA", "AVGO", "ORCL", "CRM")
+        for sym in it_peers:
+            store = ParquetPITStore(root=pit_root / sym)
+            store.write(
+                [
+                    PITRecord(
+                        ticker=Ticker(sym),
+                        field="eps_diluted",
+                        value=5.0,
+                        as_of=date(2022, 12, 31),
+                        observed_at=date(2023, 2, 15),
+                        source="SEC-EDGAR",
+                    ),
+                    # Future filing after _KNOWLEDGE_DATE must be ignored
+                    PITRecord(
+                        ticker=Ticker(sym),
+                        field="eps_diluted",
+                        value=1.0,
+                        as_of=date(2023, 12, 31),
+                        observed_at=date(2024, 2, 15),
+                        source="SEC-EDGAR",
+                    ),
+                ]
+            )
+            (prices_dir / f"{sym}.csv").write_text(
+                "date,close\n2023-06-29,175.0\n2024-06-29,500.0\n",
+                encoding="utf-8",
+            )
+
+        price_source = ingest_mod.CsvPriceSeriesSource(prices_dir)
+        assump = ingest_mod._calibrated_assumptions(
+            "AAPL",
+            knowledge_date=_KNOWLEDGE_DATE,
+            price_source=price_source,
+            pit_root=pit_root,
+        )
+        # IT disables P/B (intangible sector)
+        assert assump.peer_pb == ()
+        # Prior IT P/E median is 25.0; 6 peers at P/E = 175/5 = 35.0 pull median above 25.0
+        # but stay well below 35.0 due to Empirical Bayes shrinkage
+        assert 25.0 < assump.peer_pe[1] < 30.0
+
 
 # --------------------------------------------------------------------------- #
 # Tests: live module absent -> unavailable (not a config) error

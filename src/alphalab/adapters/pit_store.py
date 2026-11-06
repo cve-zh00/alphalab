@@ -14,7 +14,8 @@ Parquet glob path, which is derived from a validated store root.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable
+from collections import defaultdict
+from collections.abc import Iterable, Sequence
 from datetime import date
 from pathlib import Path
 
@@ -34,6 +35,14 @@ _SELECT_SQL = (
     "FROM read_parquet(?) "
     "WHERE ticker = ? AND field = ? AND observed_at <= ? "
     "ORDER BY observed_at, value"
+)
+
+_CROSS_SECTION_SQL = (
+    "SELECT ticker, field, "
+    "arg_max(value, struct_pack(a := as_of, o := observed_at)) AS val "
+    "FROM read_parquet(?, union_by_name = true) "
+    "WHERE observed_at <= ? AND field IN (SELECT UNNEST(?)) "
+    "GROUP BY ticker, field"
 )
 
 _SHARED_CON = duckdb.connect(database=":memory:")
@@ -167,3 +176,40 @@ def _as_date(value: object) -> date:
     if isinstance(value, date):
         return value
     raise TypeError(f"expected date from store, got {type(value)!r}")
+
+
+def query_latest_cross_section(
+    *,
+    root: Path,
+    fields: Sequence[str],
+    knowledge_date: KnowledgeDate,
+) -> dict[str, dict[str, float]]:
+    """Return latest knowable ``{ticker: {field: value}}`` across ``root/*/facts.parquet``.
+
+    Enforces ``observed_at <= knowledge_date`` inside parameterized DuckDB SQL
+    and selects the record with maximum ``(as_of, observed_at)`` per
+    ``(ticker, field)`` pair. Returns ``{}`` when no partitions exist under ``root``.
+    """
+    if not fields:
+        return {}
+    root_path = Path(root)
+    if not root_path.is_dir():
+        return {}
+    root_resolved = root_path.resolve()
+    partitions = [
+        p.resolve()
+        for p in root_resolved.glob("*/facts.parquet")
+        if p.is_file() and os.path.commonpath([p.resolve(), root_resolved]) == str(root_resolved)
+    ]
+    if not partitions:
+        return {}
+    glob_pattern = str(root_resolved / "*" / "facts.parquet")
+    rows = _SHARED_CON.execute(
+        _CROSS_SECTION_SQL,
+        [glob_pattern, knowledge_date.value, [str(f) for f in fields]],
+    ).fetchall()
+    out: dict[str, dict[str, float]] = defaultdict(dict)
+    for ticker_raw, field_raw, val_raw in rows:
+        if val_raw is not None:
+            out[str(ticker_raw).upper()][str(field_raw)] = float(val_raw)
+    return dict(out)

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from alphalab.adapters.pit_store import ParquetPITStore
+from alphalab.adapters.pit_store import ParquetPITStore, query_latest_cross_section
 from alphalab.domain.pit import KnowledgeDate, PITRecord
 from alphalab.domain.types import Ticker
 
@@ -122,3 +122,54 @@ class TestQueryIsParameterised:
             knowledge_date=KnowledgeDate(date(2010, 1, 1)),
         )
         assert len(again) == 2
+
+
+class TestCrossSectionQuery:
+    def test_cross_section_enforces_pit_and_selects_latest_period(self, tmp_path: Path) -> None:
+        sig = inspect.signature(query_latest_cross_section)
+        assert sig.parameters["knowledge_date"].default is inspect.Parameter.empty
+
+        # Empty root returns {}
+        assert (
+            query_latest_cross_section(
+                root=tmp_path,
+                fields=("eps_diluted",),
+                knowledge_date=KnowledgeDate(date(2024, 6, 1)),
+            )
+            == {}
+        )
+
+        s_aapl = ParquetPITStore(root=tmp_path / "AAPL")
+        s_aapl.write(
+            [
+                PITRecord(
+                    ticker=Ticker("AAPL"),
+                    field="eps_diluted",
+                    value=6.00,
+                    as_of=date(2023, 9, 30),
+                    observed_at=date(2023, 11, 3),
+                    source="SEC-EDGAR",
+                ),
+                PITRecord(
+                    ticker=Ticker("AAPL"),
+                    field="eps_diluted",
+                    value=6.50,
+                    as_of=date(2024, 9, 30),
+                    observed_at=date(2024, 11, 1),
+                    source="SEC-EDGAR",
+                ),
+            ]
+        )
+        before_2024_filing = query_latest_cross_section(
+            root=tmp_path,
+            fields=("eps_diluted",),
+            knowledge_date=KnowledgeDate(date(2024, 6, 1)),
+        )
+        assert before_2024_filing == {"AAPL": {"eps_diluted": 6.00}}
+
+        after_2024_filing = query_latest_cross_section(
+            root=tmp_path,
+            fields=("eps_diluted",),
+            knowledge_date=KnowledgeDate(date(2024, 12, 1)),
+        )
+        assert after_2024_filing == {"AAPL": {"eps_diluted": 6.50}}

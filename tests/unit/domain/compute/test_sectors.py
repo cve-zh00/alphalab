@@ -7,11 +7,14 @@ import pytest
 
 from alphalab.domain.compute.sectors import (
     SECTOR_PROFILES,
+    TANGIBLE_PB_SECTORS,
     GicsSector,
     compute_capm_cost_of_equity,
     compute_rolling_beta,
     estimate_beta_from_prices,
     resolve_sector_profile,
+    shrink_peer_band,
+    shrink_sector_profile,
     shrink_upside_empirical_bayes,
 )
 
@@ -142,3 +145,77 @@ class TestShrinkUpsideEmpiricalBayes:
         # cutting shrinkage weight roughly in half.
         expected_single = 0.10 + (0.0625 / (0.0625 + 0.01 + 0.0625)) * (0.80 - 0.10)
         assert single == pytest.approx(expected_single)
+
+
+class TestTangiblePbSectorsAndMultipleShrinkage:
+    def test_pb_is_enabled_only_in_tangible_book_sectors(self) -> None:
+        """Lev & Gu (2016); Arnott et al. (2021): disable P/B in intangible-heavy sectors."""
+        intangible_sectors = {
+            GicsSector.INFORMATION_TECHNOLOGY,
+            GicsSector.COMMUNICATION_SERVICES,
+            GicsSector.HEALTH_CARE,
+            GicsSector.CONSUMER_DISCRETIONARY,
+            GicsSector.CONSUMER_STAPLES,
+            GicsSector.INDUSTRIALS,
+        }
+        for sec, profile in SECTOR_PROFILES.items():
+            if sec in TANGIBLE_PB_SECTORS:
+                assert len(profile.peer_pb) == 3, f"{sec} should have a 3-point P/B band"
+            else:
+                assert sec in intangible_sectors
+                assert profile.peer_pb == (), f"{sec} should disable P/B due to intangible bias"
+
+    def test_shrink_peer_band_preserves_disabled_or_small_sample_bands(self) -> None:
+        prior = (22.0, 25.0, 28.0)
+        assert shrink_peer_band((), [15.0, 18.0, 20.0, 22.0, 25.0, 30.0]) == ()
+        # Fewer than min_peers=5 valid multiples -> returns prior unchanged
+        assert shrink_peer_band(prior, [28.0, 30.0, 32.0, 35.0], min_peers=5) == prior
+        # Non-positive or extreme outliers outside [min_valid, max_valid] are ignored
+        assert (
+            shrink_peer_band(
+                prior,
+                [-5.0, 0.0, 30.0, 32.0, 34.0, 500.0, float("nan")],
+                min_peers=5,
+                min_valid=2.0,
+                max_valid=150.0,
+            )
+            == prior
+        )
+        assert shrink_peer_band(prior, [30.0] * 10, max_pit_weight=0.0) == prior
+
+    def test_shrink_peer_band_empirical_bayes_weighting(self) -> None:
+        prior = (20.0, 25.0, 30.0)
+        # 15 valid observations at [30, 35, 40] -> N=15, kappa=15 -> w_eff = 0.30 * (15/30) = 0.15
+        samples = [30.0] * 5 + [35.0] * 5 + [40.0] * 5
+        shrunk = shrink_peer_band(
+            prior,
+            samples,
+            max_pit_weight=0.30,
+            prior_strength=15.0,
+            min_peers=5,
+        )
+        assert shrunk == (
+            round(0.85 * 20.0 + 0.15 * 30.0, 2),
+            round(0.85 * 25.0 + 0.15 * 35.0, 2),
+            round(0.85 * 30.0 + 0.15 * 40.0, 2),
+        )
+
+    def test_shrink_sector_profile_respects_sector_method_gates(self) -> None:
+        it_prof = SECTOR_PROFILES[GicsSector.INFORMATION_TECHNOLOGY]
+        shrunk_it = shrink_sector_profile(
+            it_prof,
+            sample_pe=[28.0, 30.0, 32.0, 34.0, 36.0, 38.0],
+            sample_pb=[6.0, 8.0, 10.0, 12.0, 14.0, 16.0],
+        )
+        assert shrunk_it.peer_pe[1] > it_prof.peer_pe[1]
+        assert shrunk_it.peer_pb == ()
+
+        fin_prof = SECTOR_PROFILES[GicsSector.FINANCIALS]
+        shrunk_fin = shrink_sector_profile(
+            fin_prof,
+            sample_pe=[12.0, 13.0, 14.0, 15.0, 16.0, 17.0],
+            sample_ev_ebitda=[8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
+            sample_pb=[1.4, 1.6, 1.8, 2.0, 2.2, 2.4],
+        )
+        assert shrunk_fin.peer_ev_ebitda == ()
+        assert shrunk_fin.peer_pb[1] > fin_prof.peer_pb[1]

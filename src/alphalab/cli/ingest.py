@@ -60,7 +60,10 @@ from alphalab.adapters.cik import CikResolver, CikSettings
 from alphalab.adapters.edgar import EdgarClient, EdgarSettings, _as_dict
 from alphalab.adapters.edgar_live import CANONICAL_CONCEPTS
 from alphalab.adapters.finbert_sentiment import FinBertSentimentScorer
-from alphalab.adapters.pit_store import ParquetPITStore  # noqa: F401  (surfaces import errors early)
+from alphalab.adapters.pit_store import (
+    ParquetPITStore,  # noqa: F401  (surfaces import errors early)
+    query_latest_cross_section,
+)
 from alphalab.adapters.prices import CsvPriceSeriesSource, PriceSeriesSource
 from alphalab.app.ingest import IngestResult, ValuationAssumptions
 from alphalab.app.inputs import AnalystRequest
@@ -69,11 +72,13 @@ from alphalab.cli.paper_transport import HttpxWriteTransport
 from alphalab.domain.analyst.contracts import RunMetadata
 from alphalab.domain.analyst.tiers import ModelTier
 from alphalab.domain.compute.sectors import (
+    GicsSector,
     compute_capm_cost_of_equity,
     estimate_ke_beta_from_prices,
     resolve_sector_profile,
+    shrink_sector_profile,
 )
-from alphalab.domain.pit import PITRecord
+from alphalab.domain.pit import KnowledgeDate, PITRecord
 from alphalab.domain.types import Ticker
 
 _CANDIDATE_CONCEPT_NAMES: frozenset[str] = frozenset(
@@ -166,14 +171,112 @@ def _generic_assumptions() -> ValuationAssumptions:
     )
 
 
+_MULTIPLES_CROSS_SECTION_FIELDS: tuple[str, ...] = (
+    "eps_diluted",
+    "stockholders_equity",
+    "shares_outstanding",
+    "operating_income",
+    "depreciation_amortization",
+    "long_term_debt",
+    "cash",
+    "net_income",
+)
+
+_SECTOR_MULTIPLES_CACHE: dict[
+    tuple[str, str, int],
+    dict[GicsSector, dict[str, tuple[float, ...]]],
+] = {}
+
+
+def _pit_sector_multiples(
+    *,
+    knowledge_date: date,
+    price_source: PriceSeriesSource,
+    pit_root: Path | None = None,
+) -> dict[GicsSector, dict[str, tuple[float, ...]]]:
+    """Compute PIT-filtered cross-sectional peer multiples grouped by GICS sector."""
+    root = pit_root if pit_root is not None else _pit_store_root()
+    cache_key = (str(root), knowledge_date.isoformat(), id(price_source))
+    cached = _SECTOR_MULTIPLES_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    cross_section = query_latest_cross_section(
+        root=root,
+        fields=_MULTIPLES_CROSS_SECTION_FIELDS,
+        knowledge_date=KnowledgeDate(knowledge_date),
+    )
+    if not cross_section:
+        _SECTOR_MULTIPLES_CACHE[cache_key] = {}
+        return {}
+
+    buckets: dict[GicsSector, dict[str, list[float]]] = {
+        sec: {"pe": [], "ev_ebitda": [], "pb": [], "ffo": []} for sec in GicsSector
+    }
+    for peer_ticker, vals in cross_section.items():
+        with contextlib.suppress(Exception):
+            pts = [
+                p.close for p in price_source.series(Ticker(peer_ticker)) if p.on <= knowledge_date
+            ]
+            if not pts or pts[-1] <= 0.0:
+                continue
+            price = float(pts[-1])
+            sec = resolve_sector_profile(peer_ticker).sector
+
+            eps = vals.get("eps_diluted")
+            if eps is not None and eps > 0.0:
+                buckets[sec]["pe"].append(price / eps)
+
+            sh = vals.get("shares_outstanding")
+            eq = vals.get("stockholders_equity")
+            if sh is not None and sh > 0.0 and eq is not None and eq > 0.0:
+                buckets[sec]["pb"].append(price / (eq / sh))
+
+            oi = vals.get("operating_income")
+            if sh is not None and sh > 0.0 and oi is not None:
+                da = max(vals.get("depreciation_amortization", 0.0), 0.0)
+                ebitda = oi + da
+                debt = max(vals.get("long_term_debt", 0.0), 0.0)
+                cash = max(vals.get("cash", 0.0), 0.0)
+                ev = price * sh + debt - cash
+                if ebitda > 0.0 and ev > 0.0:
+                    buckets[sec]["ev_ebitda"].append(ev / ebitda)
+
+            ni = vals.get("net_income")
+            da_raw = vals.get("depreciation_amortization")
+            if sh is not None and sh > 0.0 and ni is not None and da_raw is not None:
+                ffo_ps = (ni + max(da_raw, 0.0)) / sh
+                if ffo_ps > 0.0:
+                    buckets[sec]["ffo"].append(price / ffo_ps)
+
+    resolved: dict[GicsSector, dict[str, tuple[float, ...]]] = {
+        sec: {k: tuple(v) for k, v in metrics.items()} for sec, metrics in buckets.items()
+    }
+    _SECTOR_MULTIPLES_CACHE[cache_key] = resolved
+    return resolved
+
+
 def _calibrated_assumptions(
     ticker: str,
     *,
     knowledge_date: date,
     price_source: PriceSeriesSource,
+    pit_root: Path | None = None,
 ) -> ValuationAssumptions:
     """Build sector- and beta-calibrated valuation assumptions for ``ticker``."""
-    profile = resolve_sector_profile(ticker)
+    raw_profile = resolve_sector_profile(ticker)
+    pit_peers = _pit_sector_multiples(
+        knowledge_date=knowledge_date,
+        price_source=price_source,
+        pit_root=pit_root,
+    ).get(raw_profile.sector, {})
+    profile = shrink_sector_profile(
+        raw_profile,
+        sample_pe=pit_peers.get("pe", ()),
+        sample_ev_ebitda=pit_peers.get("ev_ebitda", ()),
+        sample_pb=pit_peers.get("pb", ()),
+        sample_ffo=pit_peers.get("ffo", ()),
+    )
     asset_points = [
         p.close for p in price_source.series(Ticker(ticker.upper())) if p.on <= knowledge_date
     ]

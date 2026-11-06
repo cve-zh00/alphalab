@@ -62,40 +62,59 @@ class SectorProfile:
     peer_ffo: tuple[float, ...] = ()
 
 
+#: GICS sectors where GAAP book equity (``StockholdersEquity``) is a meaningful
+#: tangible balance-sheet anchor. In intangible-heavy and buyback-intensive
+#: sectors (IT, Communication Services, Health Care, Consumer Discretionary,
+#: Consumer Staples, Industrials), uncapitalized R&D/brand assets and treasury
+#: share repurchases systematically distort book value (Lev & Gu 2016; Arnott,
+#: Harvey, Kalesnik & Linnainmaa 2021), so ``peer_pb`` is disabled ``()`` just
+#: as ``peer_ev_ebitda`` is disabled for Financials.
+TANGIBLE_PB_SECTORS: frozenset[GicsSector] = frozenset(
+    {
+        GicsSector.FINANCIALS,
+        GicsSector.REAL_ESTATE,
+        GicsSector.UTILITIES,
+        GicsSector.ENERGY,
+        GicsSector.MATERIALS,
+        GicsSector.MARKET_DEFAULT,
+    }
+)
+
+
 SECTOR_PROFILES: dict[GicsSector, SectorProfile] = {
     GicsSector.INFORMATION_TECHNOLOGY: SectorProfile(
         sector=GicsSector.INFORMATION_TECHNOLOGY,
         peer_pe=(22.0, 25.0, 28.0),
         peer_ev_ebitda=(16.0, 18.5, 21.0),
-        peer_pb=(4.5, 6.0, 7.5),
+        peer_pb=(),  # GAAP book equity distorted by intangibles & buybacks
         beta=1.18,
     ),
     GicsSector.COMMUNICATION_SERVICES: SectorProfile(
         sector=GicsSector.COMMUNICATION_SERVICES,
         peer_pe=(16.0, 19.0, 22.0),
         peer_ev_ebitda=(10.5, 12.5, 14.5),
-        peer_pb=(2.8, 3.6, 4.5),
+        peer_pb=(),  # GAAP book equity distorted by spectrum/content intangibles
         beta=1.05,
     ),
     GicsSector.HEALTH_CARE: SectorProfile(
         sector=GicsSector.HEALTH_CARE,
         peer_pe=(17.0, 20.0, 23.0),
         peer_ev_ebitda=(12.5, 14.5, 16.5),
-        peer_pb=(3.2, 4.2, 5.2),
+        peer_pb=(),  # GAAP book equity distorted by expensed R&D & IP
         beta=0.82,
     ),
     GicsSector.CONSUMER_DISCRETIONARY: SectorProfile(
         sector=GicsSector.CONSUMER_DISCRETIONARY,
         peer_pe=(17.0, 20.0, 23.0),
         peer_ev_ebitda=(11.5, 13.5, 15.5),
-        peer_pb=(3.2, 4.5, 6.0),
+        peer_pb=(),  # GAAP book equity distorted by brand intangibles & buybacks
         beta=1.15,
     ),
     GicsSector.CONSUMER_STAPLES: SectorProfile(
         sector=GicsSector.CONSUMER_STAPLES,
         peer_pe=(17.0, 19.0, 21.0),
         peer_ev_ebitda=(12.0, 13.5, 15.0),
-        peer_pb=(3.0, 4.0, 5.0),
+        peer_pb=(),  # GAAP book equity distorted by brand intangibles & buybacks
         beta=0.68,
     ),
     GicsSector.FINANCIALS: SectorProfile(
@@ -109,7 +128,7 @@ SECTOR_PROFILES: dict[GicsSector, SectorProfile] = {
         sector=GicsSector.INDUSTRIALS,
         peer_pe=(17.0, 19.5, 22.0),
         peer_ev_ebitda=(11.5, 13.5, 15.5),
-        peer_pb=(2.8, 3.6, 4.5),
+        peer_pb=(),  # GAAP book equity distorted by treasury buybacks
         beta=1.05,
     ),
     GicsSector.ENERGY: SectorProfile(
@@ -722,6 +741,111 @@ def resolve_sector_profile(ticker: str) -> SectorProfile:
     """Return the calibrated :class:`SectorProfile` for ``ticker``."""
     sector = TICKER_TO_SECTOR.get(ticker.strip().upper(), GicsSector.MARKET_DEFAULT)
     return SECTOR_PROFILES[sector]
+
+
+def shrink_peer_band(
+    prior_band: tuple[float, ...],
+    sample_multiples: Sequence[float],
+    *,
+    max_pit_weight: float = 0.30,
+    prior_strength: float = 15.0,
+    min_peers: int = 5,
+    min_valid: float = 0.2,
+    max_valid: float = 150.0,
+) -> tuple[float, ...]:
+    """Empirical Bayes shrinkage of a sector multiple band toward PIT peer quantiles.
+
+    Blends the structural through-the-cycle ``prior_band`` ``(p25, p50, p75)`` with
+    the empirical Point-in-Time cross-sectional quartiles of ``sample_multiples``
+    using precision / sample-size weighting:
+
+    ``w_eff = clip(max_pit_weight, 0, 1) * (N / (N + prior_strength))``
+
+    When ``prior_band`` is empty ``()`` (method disabled for the sector, such as
+    ``EV/EBITDA`` in Financials or ``P/B`` in asset-light sectors) or fewer than
+    ``min_peers`` valid peer multiples fall in ``[min_valid, max_valid]``, returns
+    ``prior_band`` unchanged.
+    """
+    if not prior_band:
+        return ()
+    w_cap = float(np.clip(max_pit_weight, 0.0, 1.0))
+    if w_cap <= 0.0:
+        return prior_band
+
+    arr = np.asarray(sample_multiples, dtype=float)
+    valid = arr[np.isfinite(arr) & (arr >= min_valid) & (arr <= max_valid)]
+    n = int(valid.size)
+    if n < max(1, min_peers):
+        return prior_band
+
+    kappa = max(0.0, float(prior_strength))
+    w_eff = w_cap * (n / (n + kappa)) if (n + kappa) > 0.0 else 0.0
+    if len(prior_band) == 3:
+        q25, q50, q75 = (float(x) for x in np.percentile(valid, [25.0, 50.0, 75.0]))
+        return (
+            round((1.0 - w_eff) * prior_band[0] + w_eff * q25, 2),
+            round((1.0 - w_eff) * prior_band[1] + w_eff * q50, 2),
+            round((1.0 - w_eff) * prior_band[2] + w_eff * q75, 2),
+        )
+    q50 = float(np.median(valid))
+    prior_med = float(np.median(np.asarray(prior_band, dtype=float)))
+    scale = (q50 / prior_med) if prior_med > 0.0 else 1.0
+    return tuple(round((1.0 - w_eff) * p + w_eff * (p * scale), 2) for p in prior_band)
+
+
+def shrink_sector_profile(
+    profile: SectorProfile,
+    *,
+    sample_pe: Sequence[float] = (),
+    sample_ev_ebitda: Sequence[float] = (),
+    sample_pb: Sequence[float] = (),
+    sample_ffo: Sequence[float] = (),
+    max_pit_weight: float = 0.30,
+    prior_strength: float = 15.0,
+    min_peers: int = 5,
+) -> SectorProfile:
+    """Return a copy of ``profile`` with peer multiple bands shrunk toward PIT peers."""
+    pb_prior = profile.peer_pb if profile.sector in TANGIBLE_PB_SECTORS else ()
+    return SectorProfile(
+        sector=profile.sector,
+        peer_pe=shrink_peer_band(
+            profile.peer_pe,
+            sample_pe,
+            max_pit_weight=max_pit_weight,
+            prior_strength=prior_strength,
+            min_peers=min_peers,
+            min_valid=2.0,
+            max_valid=150.0,
+        ),
+        peer_ev_ebitda=shrink_peer_band(
+            profile.peer_ev_ebitda,
+            sample_ev_ebitda,
+            max_pit_weight=max_pit_weight,
+            prior_strength=prior_strength,
+            min_peers=min_peers,
+            min_valid=2.0,
+            max_valid=100.0,
+        ),
+        peer_pb=shrink_peer_band(
+            pb_prior,
+            sample_pb,
+            max_pit_weight=max_pit_weight,
+            prior_strength=prior_strength,
+            min_peers=min_peers,
+            min_valid=0.2,
+            max_valid=80.0,
+        ),
+        beta=profile.beta,
+        peer_ffo=shrink_peer_band(
+            profile.peer_ffo,
+            sample_ffo,
+            max_pit_weight=max_pit_weight,
+            prior_strength=prior_strength,
+            min_peers=min_peers,
+            min_valid=2.0,
+            max_valid=100.0,
+        ),
+    )
 
 
 def estimate_beta_from_prices(
