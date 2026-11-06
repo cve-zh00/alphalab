@@ -183,7 +183,15 @@ def forecast_garch11_volatility(
                 continue
             c_r2 = float(r2[len(blended)])
             hl = high_low_ratios[idx]
-            if hl is not None and math.isfinite(hl) and hl > 1.0:
+            is_split_bar = abs(float(r_val)) > _DEFAULT_SPLIT_JUMP_THRESHOLD or (
+                hl is not None
+                and math.isfinite(hl)
+                and hl > 1.0
+                and math.log(hl) > _DEFAULT_SPLIT_JUMP_THRESHOLD
+            )
+            if is_split_bar:
+                blended.append(0.0)
+            elif hl is not None and math.isfinite(hl) and hl > 1.0:
                 log_hl = min(max_abs_daily_return * 1.5, math.log(hl))
                 park_var = (log_hl * log_hl) * inv_4ln2
                 blended.append(0.5 * c_r2 + 0.5 * park_var)
@@ -191,9 +199,8 @@ def forecast_garch11_volatility(
                 blended.append(c_r2)
         if len(blended) == n_obs:
             r2 = np.asarray(blended, dtype=np.float64)
-    v_full = float(np.mean(r2))
     v_target = float(np.mean(r2[-min(n_obs, max(20, target_window)) :]))
-    if v_full <= 1e-12 or v_target <= 1e-12:
+    if v_target <= 1e-12:
         node = ProvenancedValue(
             value=0.0,
             operator="garch11_variance_targeted",
@@ -214,20 +221,13 @@ def forecast_garch11_volatility(
             provenanced=node,
         )
 
-    alpha, beta = _fit_qml_alpha_beta(r2, v_full)
+    alpha, beta = _fit_qml_alpha_beta(r2, v_target)
     persistence = alpha + beta
-
-    # Strictly causal expanding/rolling variance targeting inside the recursion:
-    # at each bar tau, omega_tau uses only data observed up to tau (never future bars).
-    warmup = min(20, n_obs)
-    s2 = float(np.mean(r2[:warmup]))
-    w_len = max(20, target_window)
-    for tau in range(warmup, n_obs):
-        start_tau = max(0, tau - w_len)
-        local_uncond = float(np.mean(r2[start_tau:tau]))
-        omega_tau = local_uncond * (1.0 - persistence)
-        s2 = omega_tau + alpha * float(r2[tau]) + beta * s2
     omega = v_target * (1.0 - persistence)
+
+    s2 = v_target
+    for x in r2:
+        s2 = omega + alpha * float(x) + beta * s2
 
     scale = (
         (1.0 - persistence**horizon_days) / (horizon_days * (1.0 - persistence))

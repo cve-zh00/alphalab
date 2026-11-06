@@ -736,14 +736,19 @@ def _overlay_live_bars(
 
 
 def _volatilities_60d(
-    bars: Mapping[Ticker, Sequence[PriceBar]], as_of: date
+    bars: Mapping[Ticker, Sequence[PriceBar]],
+    as_of: date,
+    *,
+    horizon_days: int = 1,
 ) -> dict[Ticker, float]:
-    """Compute forward annualized volatility via Variance-Targeted Range-GARCH(1,1).
+    """Compute conditional annualized volatility via Variance-Targeted Range-GARCH(1,1).
 
     Uses up to 252 trailing bars (including intraday ``high/low`` Parkinson
     range when available on ``PriceBar``) with a strictly causal 126-day
-    variance target and 10-day forward horizon, falling back to trailing sample
-    stdev when fewer than 60 daily returns are available.
+    variance target. Defaults to ``horizon_days=1`` (spot 1-step-ahead
+    conditional volatility :math:`\\sigma_{t+1}\\sqrt{252}`) for daily stop-loss
+    and instantaneous risk scaling, falling back to trailing sample stdev when
+    fewer than 60 daily returns are available.
     """
     from alphalab.domain.compute.volatility import forecast_garch11_volatility
 
@@ -765,13 +770,14 @@ def _volatilities_60d(
             for i in range(1, len(window))
         ]
         if len(rets) >= 2:
-            out[ticker] = forecast_garch11_volatility(
+            fc = forecast_garch11_volatility(
                 rets,
                 high_low_ratios=hl_ratios,
-                horizon_days=10,
+                horizon_days=horizon_days,
                 min_garch_obs=60,
                 as_of=as_of,
-            ).annualized_volatility
+            )
+            out[ticker] = fc.spot_volatility if horizon_days == 1 else fc.annualized_volatility
     return out
 
 
@@ -790,7 +796,7 @@ def _residual_volatilities_60d(
     """
     from alphalab.domain.compute.volatility import forecast_garch11_volatility
 
-    total_vols = _volatilities_60d(bars, as_of)
+    total_vols = _volatilities_60d(bars, as_of, horizon_days=21)
     spy_series = [b for b in bars.get(_SPY, ()) if b.on <= as_of and b.close > 0.0][-127:]
     if len(spy_series) < 16:
         return total_vols
