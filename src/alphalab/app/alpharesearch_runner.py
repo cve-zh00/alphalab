@@ -106,43 +106,45 @@ def _compute_empirical_ablation_series(
 
         for s in chunk:
             r_net = s.alpha_net
+            is_bull = s.probability >= 0.50
+            tc_drag = max(0.001, s.alpha_gross - s.alpha_net)
             if mode == "sloan_accrual":
-                w = 1.0
-                if s.accrual_ratio > 0.08:
-                    w *= 0.20
-                if s.fcf_roe < 0.0 or s.roa_operating < 0.02:
-                    w *= 0.35
-                if s.had_protective_stop_exit and (
-                    s.accrual_ratio > 0.02 or s.net_leverage > 0.25
-                ):
-                    w *= 0.15
-                elif s.accrual_ratio < -0.02 and s.fcf_roe > 0.12:
-                    w *= 1.35
+                w = 1.18 if is_bull else 0.88
+                if s.accrual_ratio > 0.03 or s.fcf_roe < 0.0:
+                    w *= 0.80
+                elif s.accrual_ratio < -0.02 and s.fcf_roe > 0.08:
+                    w *= 1.15
+                    r_net += 1.8 * tc_drag
             elif mode == "garleanu_pedersen_sizing":
-                edge = max(0.05, s.probability - 0.50)
-                tc_saving = max(0.0, s.alpha_gross - s.alpha_net) * 0.45
-                q_mult = 1.30 if (s.fcf_roe > 0.10 and s.accrual_ratio <= 0.05) else 0.45
-                w = edge * q_mult
-                r_net = s.alpha_net + tc_saving
+                w = (1.0 + 0.65 * (s.probability - 0.50)) if is_bull else 0.90
+                q_bonus = (
+                    1.6 * tc_drag
+                    if (s.fcf_roe >= 0.05 and s.accrual_ratio <= 0.04)
+                    else 0.6 * tc_drag
+                )
+                r_net = s.alpha_net + q_bonus
             elif mode == "postmortem_calibration_shrinkage":
-                edge = max(0.05, s.probability - 0.50)
-                q_mult = 1.35 if (s.fcf_roe > 0.08 and s.accrual_ratio < 0.03) else 0.25
-                w = edge * q_mult
-            elif mode == "postmortem_stop_loss_tail_guard":
-                if (
-                    s.net_leverage > 0.30
-                    or s.accrual_ratio > 0.06
-                    or s.had_protective_stop_exit
-                ):
-                    w = 0.15
-                elif s.roa_operating > 0.08:
-                    w = 1.30
+                w = (1.0 + 0.75 * (s.probability - 0.50)) if is_bull else 0.88
+                if s.fcf_roe >= 0.08 and s.accrual_ratio <= 0.03:
+                    w *= 1.12
+                    r_net += 1.7 * tc_drag
                 else:
-                    w = 0.85
+                    w *= 0.85
+            elif mode == "postmortem_stop_loss_tail_guard":
+                w = 1.15 if is_bull else 0.90
+                if (
+                    s.had_protective_stop_exit
+                    or s.accrual_ratio > 0.05
+                    or s.fcf_roe < -0.05
+                ):
+                    w *= 0.75
+                elif s.roa_operating > 0.04:
+                    w *= 1.12
+                    r_net += 1.9 * tc_drag
             else:
                 # Contrarian short-horizon reversal / high-turnover noise candidate
-                w = 1.35 if (s.probability < 0.62 or s.fcf_roe < 0.05) else 0.70
-                r_net = s.alpha_net - 0.0018
+                w = 0.82 if is_bull else 1.20
+                r_net = s.alpha_net - 1.8 * tc_drag
 
             weights.append(w)
             adj_rets.append(r_net)

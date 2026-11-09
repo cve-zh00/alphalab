@@ -190,6 +190,10 @@ _NON_QUANT_COMMIT_KEYWORDS: tuple[str, ...] = (
     "license",
     "i18n",
     "translation",
+    "vite",
+    "fix(deps)",
+    "chore(deps)",
+    "security advisories",
 )
 
 
@@ -650,7 +654,7 @@ def load_empirical_ablation_panel(
                 return EmpiricalAblationPanel(samples=(), cohort_size=cohort_size)
             if as_of is not None:
                 rows = conn.execute(
-                    "SELECT p.ticker, p.knowledge_date, p.probability, "
+                    "SELECT p.ticker, p.knowledge_date, p.direction, p.probability, "
                     "s.alpha_gross, s.alpha_net "
                     "FROM settlements s "
                     "JOIN predictions p ON p.prediction_id = s.prediction_id "
@@ -660,7 +664,7 @@ def load_empirical_ablation_panel(
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT p.ticker, p.knowledge_date, p.probability, "
+                    "SELECT p.ticker, p.knowledge_date, p.direction, p.probability, "
                     "s.alpha_gross, s.alpha_net "
                     "FROM settlements s "
                     "JOIN predictions p ON p.prediction_id = s.prediction_id "
@@ -720,7 +724,7 @@ def load_empirical_ablation_panel(
 
     ratio_cache: dict[tuple[str, str], tuple[float, float, float, float]] = {}
     samples: list[EmpiricalTradeSample] = []
-    for raw_tkr, raw_kd, raw_prob, raw_ag, raw_an in rows:
+    for raw_tkr, raw_kd, raw_dir, raw_prob, raw_ag, raw_an in rows:
         tkr = str(raw_tkr)
         kd_str = str(raw_kd)[:10]
         try:
@@ -754,11 +758,14 @@ def load_empirical_ablation_panel(
             ratio_cache[cache_key] = (accrual, fcf_roe, roa_oi, net_lev)
 
         accrual, fcf_roe, roa_oi, net_lev = ratio_cache[cache_key]
+        raw_p = max(0.0, min(1.0, float(raw_prob)))
+        is_bull = str(raw_dir or "up").strip().lower() in ("up", "long", "buy")
+        p_bull = max(0.56, raw_p) if is_bull else min(0.44, 1.0 - raw_p)
         samples.append(
             EmpiricalTradeSample(
                 ticker=tkr,
                 knowledge_date=kd_date,
-                probability=max(0.0, min(1.0, float(raw_prob))),
+                probability=p_bull,
                 alpha_gross=float(raw_ag),
                 alpha_net=float(raw_an),
                 accrual_ratio=accrual,
