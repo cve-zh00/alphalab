@@ -72,6 +72,8 @@ def _maybe_load_dotenv() -> None:
         return
     env_path = _project_root() / ".env"
     if not env_path.is_file():
+        env_path = Path.cwd() / ".env"
+    if not env_path.is_file():
         return
     for raw_line in env_path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()

@@ -26,6 +26,7 @@ I/O adapters, and all I/O stays behind those adapters.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -133,6 +134,16 @@ def register_forecast(
     """
     knowledge_date = _require_knowledge_date(artifact)
     _reject_leakage(knowledge_date, llm_cutoff)
+    if horizon <= knowledge_date:
+        raise ValueError("horizon must fall after the knowledge date")
+    if not math.isfinite(artifact.current_price) or artifact.current_price <= 0.0:
+        abstention = Abstention(
+            ticker=artifact.ticker,
+            knowledge_date=knowledge_date,
+            reason="current price unavailable at knowledge date",
+        )
+        abstentions.record(abstention)
+        return abstention
 
     effective_penalty = (
         overconfidence_penalty

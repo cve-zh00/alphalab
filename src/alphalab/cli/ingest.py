@@ -47,13 +47,15 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 from collections.abc import Callable
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
+from alphalab.adapters.alpaca_bars import AlpacaBarsClient, DataFeed
 from alphalab.adapters.alpaca_config import AlpacaSettings
 from alphalab.adapters.alpaca_news import AlpacaNewsClient
 from alphalab.adapters.cik import CikResolver, CikSettings
@@ -64,9 +66,10 @@ from alphalab.adapters.pit_store import (
     ParquetPITStore,  # noqa: F401  (surfaces import errors early)
     query_latest_cross_section,
 )
-from alphalab.adapters.prices import CsvPriceSeriesSource, PriceSeriesSource
+from alphalab.adapters.prices import CsvPriceSeriesSource, PricePoint, PriceSeriesSource
 from alphalab.app.ingest import IngestResult, ValuationAssumptions
 from alphalab.app.inputs import AnalystRequest
+from alphalab.cli.alpaca_prices import AlpacaPriceProvider
 from alphalab.cli.forecast_paths import project_root
 from alphalab.cli.paper_transport import HttpxWriteTransport
 from alphalab.domain.analyst.contracts import RunMetadata
@@ -213,41 +216,50 @@ def _pit_sector_multiples(
     buckets: dict[GicsSector, dict[str, list[float]]] = {
         sec: {"pe": [], "ev_ebitda": [], "pb": [], "ffo": []} for sec in GicsSector
     }
-    for peer_ticker, vals in cross_section.items():
-        with contextlib.suppress(Exception):
-            pts = [
-                p.close for p in price_source.series(Ticker(peer_ticker)) if p.on <= knowledge_date
-            ]
-            if not pts or pts[-1] <= 0.0:
-                continue
-            price = float(pts[-1])
-            sec = resolve_sector_profile(peer_ticker).sector
+    prev_live = getattr(price_source, "allow_live_fetch", None)
+    if prev_live is not None:
+        price_source.allow_live_fetch = False  # type: ignore[attr-defined]
+    try:
+        for peer_ticker, vals in cross_section.items():
+            with contextlib.suppress(Exception):
+                pts = [
+                    p.close
+                    for p in price_source.series(Ticker(peer_ticker))
+                    if p.on <= knowledge_date
+                ]
+                if not pts or pts[-1] <= 0.0:
+                    continue
+                price = float(pts[-1])
+                sec = resolve_sector_profile(peer_ticker).sector
 
-            eps = vals.get("eps_diluted")
-            if eps is not None and eps > 0.0:
-                buckets[sec]["pe"].append(price / eps)
+                eps = vals.get("eps_diluted")
+                if eps is not None and eps > 0.0:
+                    buckets[sec]["pe"].append(price / eps)
 
-            sh = vals.get("shares_outstanding")
-            eq = vals.get("stockholders_equity")
-            if sh is not None and sh > 0.0 and eq is not None and eq > 0.0:
-                buckets[sec]["pb"].append(price / (eq / sh))
+                sh = vals.get("shares_outstanding")
+                eq = vals.get("stockholders_equity")
+                if sh is not None and sh > 0.0 and eq is not None and eq > 0.0:
+                    buckets[sec]["pb"].append(price / (eq / sh))
 
-            oi = vals.get("operating_income")
-            if sh is not None and sh > 0.0 and oi is not None:
-                da = max(vals.get("depreciation_amortization", 0.0), 0.0)
-                ebitda = oi + da
-                debt = max(vals.get("long_term_debt", 0.0), 0.0)
-                cash = max(vals.get("cash", 0.0), 0.0)
-                ev = price * sh + debt - cash
-                if ebitda > 0.0 and ev > 0.0:
-                    buckets[sec]["ev_ebitda"].append(ev / ebitda)
+                oi = vals.get("operating_income")
+                if sh is not None and sh > 0.0 and oi is not None:
+                    da = max(vals.get("depreciation_amortization", 0.0), 0.0)
+                    ebitda = oi + da
+                    debt = max(vals.get("long_term_debt", 0.0), 0.0)
+                    cash = max(vals.get("cash", 0.0), 0.0)
+                    ev = price * sh + debt - cash
+                    if ebitda > 0.0 and ev > 0.0:
+                        buckets[sec]["ev_ebitda"].append(ev / ebitda)
 
-            ni = vals.get("net_income")
-            da_raw = vals.get("depreciation_amortization")
-            if sh is not None and sh > 0.0 and ni is not None and da_raw is not None:
-                ffo_ps = (ni + max(da_raw, 0.0)) / sh
-                if ffo_ps > 0.0:
-                    buckets[sec]["ffo"].append(price / ffo_ps)
+                ni = vals.get("net_income")
+                da_raw = vals.get("depreciation_amortization")
+                if sh is not None and sh > 0.0 and ni is not None and da_raw is not None:
+                    ffo_ps = (ni + max(da_raw, 0.0)) / sh
+                    if ffo_ps > 0.0:
+                        buckets[sec]["ffo"].append(price / ffo_ps)
+    finally:
+        if prev_live is not None:
+            price_source.allow_live_fetch = prev_live  # type: ignore[attr-defined]
 
     resolved: dict[GicsSector, dict[str, tuple[float, ...]]] = {
         sec: {k: tuple(v) for k, v in metrics.items()} for sec, metrics in buckets.items()
@@ -376,16 +388,68 @@ class _CachingEdgarClient(EdgarClient):
         return data
 
 
-def _price_source() -> PriceSeriesSource:
-    """Local close-series source (the sanctioned ``PriceSeriesSource``).
+_LIVE_BARS_MEM_CACHE: dict[Ticker, list[PricePoint]] = {}
 
-    Reuses :class:`~alphalab.adapters.prices.CsvPriceSeriesSource` over the
-    repo's ``data/prices`` directory — the same series the settler prices
-    against. When a ticker has no local series the price resolves to ``NaN``
-    (no look-ahead, no fabrication); the valuation methods still run on EDGAR
-    fundamentals and the report states the price is unavailable.
+
+class _LivePriceSeriesSource:
+    """Local CSV close-series source with on-demand Alpaca daily bars fallback.
+
+    Reads ``data/prices/<ticker>.csv`` first. When ``allow_live_fetch`` is
+    enabled and the local CSV is absent or stale (> 5 calendar days behind the
+    requested ``target_date``), queries :class:`AlpacaPriceProvider` for
+    ``(ticker, SPY)`` and caches the resulting :class:`PricePoint` series in
+    memory so subsequent lookups for ``ticker`` or ``SPY`` incur zero extra
+    network calls.
     """
-    return CsvPriceSeriesSource(_data_dir() / "prices")
+
+    def __init__(self, prices_dir: Path, *, target_date: date | None = None) -> None:
+        self._csv = CsvPriceSeriesSource(prices_dir)
+        self.target_date = target_date
+        self.allow_live_fetch: bool = True
+
+    def series(self, ticker: Ticker) -> list[PricePoint]:
+        sym = Ticker(str(ticker).upper())
+        cached = _LIVE_BARS_MEM_CACHE.get(sym)
+        if cached is not None:
+            return cached
+
+        csv_pts = self._csv.series(sym)
+        if not self.allow_live_fetch or not isinstance(HttpxWriteTransport, type):
+            return csv_pts
+        if os.environ.get("ALPHALAB_PAPER_PRICES", "live").lower() == "csv":
+            return csv_pts
+
+        ref_date = self.target_date or datetime.now(UTC).date()
+        is_fresh = bool(csv_pts and csv_pts[-1].on >= ref_date - timedelta(days=5))
+        if is_fresh:
+            return csv_pts
+
+        with contextlib.suppress(Exception):
+            settings = AlpacaSettings()  # type: ignore[call-arg]
+            feed = DataFeed(os.environ.get("ALPHALAB_ALPACA_FEED", "sip").lower())
+            client = AlpacaBarsClient(
+                settings,
+                transport=HttpxWriteTransport(),
+                feed=feed,
+                with_raw_close=True,
+            )
+            provider = AlpacaPriceProvider(
+                client,
+                tickers=(sym, Ticker("SPY")),
+                today=min(datetime.now(UTC).date(), ref_date + timedelta(days=1)),
+            )
+            fetched = provider.recent_bars()
+            for fetched_sym, bars in fetched.items():
+                if bars:
+                    _LIVE_BARS_MEM_CACHE[fetched_sym] = [
+                        PricePoint(on=b.on, close=b.close, raw_close=b.raw_close) for b in bars
+                    ]
+        return _LIVE_BARS_MEM_CACHE.get(sym, csv_pts)
+
+
+def _price_source() -> PriceSeriesSource:
+    """Close-series source for ``--source live`` (local CSV + Alpaca fallback)."""
+    return _LivePriceSeriesSource(_data_dir() / "prices")
 
 
 def _run_metadata(knowledge_date: date) -> RunMetadata:
@@ -484,6 +548,8 @@ def _build_live_request(
     user sees *why* there is no request rather than an invented number.
     """
     resolved_prices = price_source or _price_source()
+    if isinstance(resolved_prices, _LivePriceSeriesSource):
+        resolved_prices.target_date = knowledge_date
     sym = Ticker(ticker)
     result = build(
         sym,

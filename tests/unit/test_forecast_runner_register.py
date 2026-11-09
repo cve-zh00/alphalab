@@ -206,6 +206,23 @@ class TestVerdictMapping:
         assert isinstance(result, Prediction)
         assert result.probability == pytest.approx(0.50)
 
+    def test_nan_current_price_abstains_instead_of_crashing(
+        self, journal: SqliteJournal, abstentions: SqliteAbstentionStore
+    ) -> None:
+        """Missing price at knowledge_date records an abstention rather than crashing."""
+        result = register_forecast(
+            _artifact(verdict=Verdict.BUY, current_price=float("nan"), target=240.0),
+            horizon=_HORIZON,
+            recorded_at=_NOW,
+            journal=journal,
+            abstentions=abstentions,
+            llm_cutoff=_CUTOFF_BEFORE,
+        )
+        assert isinstance(result, Abstention)
+        assert "current price unavailable" in result.reason
+        assert journal.list_predictions() == []
+        assert abstentions.count() == 1
+
 
 class TestKnowledgeDateGuard:
     def test_missing_knowledge_date_is_rejected(

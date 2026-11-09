@@ -366,3 +366,27 @@ def test_caching_edgar_client_writes_and_reads_cache(tmp_path: Path) -> None:
     second = client.company_facts(Ticker("AAPL"), cik="0000320193")
     assert first == second
     assert len(transport.urls) == 1
+
+
+def test_live_price_series_source_falls_back_to_alpaca_when_csv_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from alphalab.adapters.prices import PricePoint
+    from alphalab.domain.backtest.types import PriceBar
+    from alphalab.domain.types import Ticker
+
+    ingest_mod._LIVE_BARS_MEM_CACHE.clear()
+    monkeypatch.setenv("ALPHALAB_ALPACA_KEY_ID", "test-key")
+    monkeypatch.setenv("ALPHALAB_ALPACA_SECRET_KEY", "test-secret")
+    monkeypatch.setattr(
+        ingest_mod.AlpacaPriceProvider,
+        "recent_bars",
+        lambda self: {
+            Ticker("AAPL"): (PriceBar(on=date(2023, 6, 29), close=189.25, raw_close=189.25),)
+        },
+    )
+
+    source = ingest_mod._LivePriceSeriesSource(tmp_path / "prices", target_date=_KNOWLEDGE_DATE)
+    pts = source.series(Ticker("AAPL"))
+    assert pts == [PricePoint(on=date(2023, 6, 29), close=189.25, raw_close=189.25)]
+    ingest_mod._LIVE_BARS_MEM_CACHE.clear()

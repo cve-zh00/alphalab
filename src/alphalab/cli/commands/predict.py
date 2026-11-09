@@ -41,7 +41,7 @@ from alphalab.app.forecast_runner import LeakageError, register_forecast
 from alphalab.artifact.models import EquityResearchArtifact, Verdict
 from alphalab.cli.commands.research import ResearchOptions, build_research, report_pipeline_error
 from alphalab.cli.fixtures import FixtureNotFoundError
-from alphalab.cli.ingest import LiveIngestUnavailableError
+from alphalab.cli.ingest import LiveIngestConfigError, LiveIngestUnavailableError
 from alphalab.domain.forecast import Abstention
 from alphalab.domain.journal import Prediction
 from alphalab.report.theme import Theme, theme_for
@@ -210,6 +210,9 @@ def _predict_one(
     except FixtureNotFoundError as exc:
         print(f"error: {exc}", file=err)
         return _Skipped(ticker=ticker, reason=str(exc), exit_code=2)
+    except LiveIngestConfigError as exc:
+        print(f"error: {exc}", file=err)
+        return _Abort(exit_code=2)
     except LiveIngestUnavailableError as exc:
         print(f"error: {exc}", file=err)
         return _Skipped(ticker=ticker, reason=str(exc), exit_code=1)
