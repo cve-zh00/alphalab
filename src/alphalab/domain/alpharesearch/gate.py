@@ -70,6 +70,7 @@ def run_skeptic_review(
     proposal: ResearchProposal,
     *,
     rejected_proposal_ids: frozenset[str] = frozenset(),
+    promoted_proposal_ids: frozenset[str] = frozenset(),
     max_loc_delta: int = MAX_COMPLEXITY_LOC_DELTA,
     max_turnover_increase_pct: float = MAX_TURNOVER_INCREASE_PCT,
 ) -> SkepticCritique:
@@ -77,18 +78,26 @@ def run_skeptic_review(
     findings: list[AuditFinding] = []
     safeguards: list[str] = []
 
-    # 1. Graveyard anti-snooping deduplication
-    is_repeat = proposal.proposal_id in rejected_proposal_ids
+    # 1. Graveyard / prior-promotion anti-snooping deduplication
+    is_rejected_repeat = proposal.proposal_id in rejected_proposal_ids
+    is_promoted_repeat = proposal.proposal_id in promoted_proposal_ids
+    is_repeat = is_rejected_repeat or is_promoted_repeat
+    if is_rejected_repeat:
+        dedup_msg = (
+            f"proposal {proposal.proposal_id} was already rejected in a prior committee cycle"
+        )
+    elif is_promoted_repeat:
+        dedup_msg = (
+            f"proposal {proposal.proposal_id} was already promoted in a prior committee cycle"
+        )
+    else:
+        dedup_msg = f"proposal {proposal.proposal_id} is novel"
     findings.append(
         AuditFinding(
             check="alpharesearch.skeptic.graveyard_dedup",
             passed=not is_repeat,
             severity=Severity.HARD,
-            message=(
-                f"proposal {proposal.proposal_id} was already rejected in a prior committee cycle"
-                if is_repeat
-                else f"proposal {proposal.proposal_id} is novel"
-            ),
+            message=dedup_msg,
             values=(),
         )
     )
@@ -365,6 +374,7 @@ def judge_proposal(
     prior_n_trials: int,
     rng: np.random.Generator,
     rejected_proposal_ids: frozenset[str] = frozenset(),
+    promoted_proposal_ids: frozenset[str] = frozenset(),
     trial_id: str | None = None,
     trial_sharpe_std: float | None = None,
 ) -> CommitteeDecision:
@@ -372,6 +382,7 @@ def judge_proposal(
     skeptic = run_skeptic_review(
         proposal,
         rejected_proposal_ids=rejected_proposal_ids,
+        promoted_proposal_ids=promoted_proposal_ids,
     )
     scorecard = run_empirical_gatekeeper(
         proposal,

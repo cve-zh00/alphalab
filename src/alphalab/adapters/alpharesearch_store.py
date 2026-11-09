@@ -121,6 +121,23 @@ class SQLiteAlphaResearchStore:
             ).fetchall()
         return frozenset(str(r["proposal_id"]) for r in rows)
 
+    def promoted_proposal_ids(self) -> frozenset[str]:
+        """Return all ``proposal_id`` hashes previously promoted to a weekly plan."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT proposal_id FROM proposal_decisions WHERE status = ?",
+                (ProposalDecisionStatus.PROMOTED_TO_PLAN.value,),
+            ).fetchall()
+        return frozenset(str(r["proposal_id"]) for r in rows)
+
+    def evaluated_proposal_ids(self) -> frozenset[str]:
+        """Return all ``proposal_id`` hashes previously evaluated by the committee."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT proposal_id FROM proposal_decisions"
+            ).fetchall()
+        return frozenset(str(r["proposal_id"]) for r in rows)
+
     def total_trials_count(self) -> int:
         """Return cumulative number of proposals evaluated across all runs."""
         with self._connect() as conn:

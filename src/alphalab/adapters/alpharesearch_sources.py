@@ -28,10 +28,13 @@ from datetime import date
 from pathlib import Path
 
 import httpx
+import pyarrow.parquet as pq
 
 from alphalab.domain.alpharesearch.contracts import (
     DiscoverySignal,
     DiscoverySourceKind,
+    EmpiricalAblationPanel,
+    EmpiricalTradeSample,
     TargetSubsystem,
 )
 
@@ -41,6 +44,7 @@ __all__ = [
     "LivePortfolioPostmortemScanner",
     "LocalReferenceRepoScanner",
     "RemoteGitHubRepoScanner",
+    "load_empirical_ablation_panel",
 ]
 
 DEFAULT_REMOTE_REPOS: tuple[str, ...] = (
@@ -174,6 +178,26 @@ class LocalReferenceRepoScanner:
         return tuple(signals)
 
 
+_NON_QUANT_COMMIT_KEYWORDS: tuple[str, ...] = (
+    "telegram",
+    "discord",
+    "community link",
+    "readme",
+    "typo",
+    "badge",
+    "funding",
+    "sponsor",
+    "license",
+    "i18n",
+    "translation",
+)
+
+
+def _is_non_quant_commit_message(message: str) -> bool:
+    lower = message.lower()
+    return any(kw in lower for kw in _NON_QUANT_COMMIT_KEYWORDS)
+
+
 class RemoteGitHubRepoScanner:
     """Query tracked remote GitHub repositories for recent commits."""
 
@@ -201,7 +225,7 @@ class RemoteGitHubRepoScanner:
 
         signals: list[DiscoverySignal] = []
         for repo in self._repos:
-            url = f"https://api.github.com/repos/{repo}/commits?per_page=1"
+            url = f"https://api.github.com/repos/{repo}/commits?per_page=10"
             try:
                 resp = httpx.get(url, headers=headers, timeout=self._timeout)
                 if resp.status_code != 200:
@@ -209,23 +233,33 @@ class RemoteGitHubRepoScanner:
                 payload = resp.json()
                 if not isinstance(payload, list) or not payload:
                     continue
-                latest = payload[0]
-                sha = str(latest.get("sha", ""))
+                selected = None
+                for candidate in payload:
+                    if not isinstance(candidate, Mapping):
+                        continue
+                    c_info = candidate.get("commit", {}) or {}
+                    c_msg = str(c_info.get("message", "")).splitlines()[0]
+                    if not _is_non_quant_commit_message(c_msg):
+                        selected = candidate
+                        break
+                if selected is None:
+                    continue
+                sha = str(selected.get("sha", ""))
                 if not sha:
                     continue
                 source_key = f"remote:{repo}"
                 if wm.get(source_key) == sha:
                     continue
-                commit_info = latest.get("commit", {}) or {}
+                commit_info = selected.get("commit", {}) or {}
                 message = str(commit_info.get("message", "")).splitlines()[0][:80]
-                html_url = str(latest.get("html_url", f"https://github.com/{repo}/commit/{sha}"))
+                html_url = str(selected.get("html_url", f"https://github.com/{repo}/commit/{sha}"))
                 subsys = (
                     TargetSubsystem.RISK_GUARDS
                     if "nofx" in repo.lower()
                     else TargetSubsystem.PRESCREEN
                 )
                 mechanism = (
-                    "Volatility-regime adaptive trailing stop & cooldown decay (NoFxAiOS/nofx)"
+                    f"Volatility-regime adaptive trailing stop & cooldown decay ({repo}: {message})"
                     if "nofx" in repo.lower()
                     else f"Upstream quantitative update in {repo}: {message}"
                 )
@@ -251,8 +285,15 @@ class RemoteGitHubRepoScanner:
 class AcademicPaperScanner:
     """Query arXiv Quantitative Finance (`q-fin`) for recent academic papers."""
 
-    def __init__(self, *, max_results: int = 4, timeout_seconds: float = 6.0) -> None:
+    def __init__(
+        self,
+        *,
+        max_results: int = 12,
+        max_emit: int = 4,
+        timeout_seconds: float = 6.0,
+    ) -> None:
         self._max_results = max_results
+        self._max_emit = max_emit
         self._timeout = timeout_seconds
 
     def scan(
@@ -268,6 +309,7 @@ class AcademicPaperScanner:
             f"sortBy=submittedDate&sortOrder=descending&max_results={self._max_results}"
         )
         signals: list[DiscoverySignal] = []
+        fetched_any_entry = False
         try:
             resp = httpx.get(url, timeout=self._timeout, follow_redirects=True)
             if resp.status_code == 200 and resp.text:
@@ -286,6 +328,7 @@ class AcademicPaperScanner:
                     ]
                     if not raw_id or not title:
                         continue
+                    fetched_any_entry = True
                     paper_id = raw_id.rsplit("/", 1)[-1]
                     if wm.get(f"paper:{paper_id}") == paper_id:
                         continue
@@ -299,8 +342,13 @@ class AcademicPaperScanner:
                         subsys = TargetSubsystem.EXECUTION
                     elif "drawdown" in lower_blob or "stop" in lower_blob or "risk" in lower_blob:
                         subsys = TargetSubsystem.RISK_GUARDS
+                    elif "llm" in lower_blob or "calibration" in lower_blob:
+                        subsys = TargetSubsystem.CALIBRATION
                     elif (
-                        "portfolio" in lower_blob or "weight" in lower_blob or "kelly" in lower_blob
+                        "portfolio" in lower_blob
+                        or "weight" in lower_blob
+                        or "kelly" in lower_blob
+                        or "volatility" in lower_blob
                     ):
                         subsys = TargetSubsystem.SIZING
                     else:
@@ -323,10 +371,12 @@ class AcademicPaperScanner:
                             suggested_subsystem=subsys,
                         )
                     )
+                    if len(signals) >= self._max_emit:
+                        break
         except Exception:
             pass
 
-        if not signals:
+        if not signals and not fetched_any_entry:
             fallback_id = "garleanu-pedersen-2013-dynamic-trading"
             if wm.get(f"paper:{fallback_id}") != fallback_id:
                 signals.append(
@@ -374,46 +424,108 @@ class LivePortfolioPostmortemScanner:
         if self._execution_db.is_file():
             try:
                 with sqlite3.connect(self._execution_db) as conn:
-                    row = conn.execute(
-                        "SELECT COUNT(*), MAX(occurred_at) FROM position_events "
-                        "WHERE event_type IN ('STOP_EXIT', 'DRAWDOWN_EXIT')"
-                    ).fetchone()
-                    exit_count = int(row[0] or 0) if row else 0
-                    latest_exit_ts = str(row[1] or "none") if row else "none"
-
-                    cycle_row = conn.execute(
-                        "SELECT COUNT(*), MAX(started_at) FROM cycle_runs"
-                    ).fetchone()
-                    cycle_count = int(cycle_row[0] or 0) if cycle_row else 0
-                    latest_cycle_ts = (
-                        str(cycle_row[1] or as_of.isoformat()) if cycle_row else as_of.isoformat()
+                    has_exec_events = (
+                        conn.execute(
+                            "SELECT 1 FROM sqlite_master "
+                            "WHERE type = 'table' AND name = 'execution_events'"
+                        ).fetchone()
+                        is not None
                     )
+                    if has_exec_events:
+                        summary_row = conn.execute(
+                            "SELECT COUNT(DISTINCT cycle_id), MAX(recorded_at), "
+                            "SUM(CASE WHEN kind = 'filled' THEN 1 ELSE 0 END), "
+                            "SUM(CASE WHEN kind = 'rejected' THEN 1 ELSE 0 END) "
+                            "FROM execution_events"
+                        ).fetchone()
+                        cycle_count = int(summary_row[0] or 0) if summary_row else 0
+                        latest_cycle_ts = (
+                            str(summary_row[1] or as_of.isoformat())
+                            if summary_row
+                            else as_of.isoformat()
+                        )
+                        n_fills = int(summary_row[2] or 0) if summary_row else 0
+                        n_rejected = int(summary_row[3] or 0) if summary_row else 0
+                        exit_rows = conn.execute(
+                            "SELECT ticker, detail FROM execution_events "
+                            "WHERE detail LIKE '%stop_loss_exit%' OR detail LIKE '%drawdown_exit%'"
+                        ).fetchall()
+                        exit_count = len(exit_rows)
+                        n_stop = sum(
+                            1 for _, detail in exit_rows if "stop_loss_exit" in str(detail or "")
+                        )
+                        n_dd = sum(
+                            1 for _, detail in exit_rows if "drawdown_exit" in str(detail or "")
+                        )
+                        stop_tickers = sorted(
+                            {
+                                str(t)
+                                for t, detail in exit_rows
+                                if t and "stop_loss_exit" in str(detail or "")
+                            }
+                        )
+                        token = f"exec:{cycle_count}:{exit_count}:{n_fills}:{n_rejected}"
+                        title = (
+                            f"Live portfolio postmortem across {cycle_count} cycles "
+                            f"({exit_count} protective exits: {n_stop} stop-loss, "
+                            f"{n_dd} drawdown; {n_fills} fills, {n_rejected} guard blocks)"
+                        )
+                        stop_list = ", ".join(stop_tickers[:6]) if stop_tickers else "none"
+                        summary_text = (
+                            f"Audited {cycle_count} live execution cycles through "
+                            f"{latest_cycle_ts[:19]}: {n_fills} filled orders, {n_rejected} NOFX "
+                            f"guard rejections, {n_stop} Lot-1 stop-loss exits ({stop_list}), and "
+                            f"{n_dd} Ornstein-Uhlenbeck drawdown giveback exits."
+                        )
+                        subsys = TargetSubsystem.RISK_GUARDS
+                        emit_exec = cycle_count > 0
+                    else:
+                        row = conn.execute(
+                            "SELECT COUNT(*), MAX(occurred_at) FROM position_events "
+                            "WHERE event_type IN ('STOP_EXIT', 'DRAWDOWN_EXIT')"
+                        ).fetchone()
+                        exit_count = int(row[0] or 0) if row else 0
+                        latest_exit_ts = str(row[1] or "none") if row else "none"
 
-                token = f"exec:{cycle_count}:{exit_count}:{latest_exit_ts}"
-                if wm.get("postmortem:execution") != token:
+                        cycle_row = conn.execute(
+                            "SELECT COUNT(*), MAX(started_at) FROM cycle_runs"
+                        ).fetchone()
+                        cycle_count = int(cycle_row[0] or 0) if cycle_row else 0
+                        latest_cycle_ts = (
+                            str(cycle_row[1] or as_of.isoformat())
+                            if cycle_row
+                            else as_of.isoformat()
+                        )
+                        token = f"exec:{cycle_count}:{exit_count}:{latest_exit_ts}"
+                        title = (
+                            f"Live portfolio postmortem across {cycle_count} cycles "
+                            f"({exit_count} protective stop/drawdown exits)"
+                        )
+                        summary_text = (
+                            f"Audited {cycle_count} live execution cycles through "
+                            f"{latest_cycle_ts}: {exit_count} protective exits triggered "
+                            "(Ornstein-Uhlenbeck convergence / Lot-1 stop-loss). Opportunity "
+                            "to tighten pre-entry quality & earnings accrual filter."
+                        )
+                        subsys = TargetSubsystem.PRESCREEN
+                        emit_exec = True
+
+                if emit_exec and wm.get("postmortem:execution") != token:
                     signals.append(
                         DiscoverySignal(
                             signal_id=f"postmortem-exec-{as_of.isoformat()}",
                             source_kind=DiscoverySourceKind.LIVE_POSTMORTEM,
                             source_name="data/execution.db",
-                            title=(
-                                f"Live portfolio postmortem across {cycle_count} cycles "
-                                f"({exit_count} protective stop/drawdown exits)"
-                            ),
+                            title=title,
                             reference_uri=str(self._execution_db),
                             observed_at=as_of,
                             watermark_token=token,
-                            summary=(
-                                f"Audited {cycle_count} live execution cycles through "
-                                f"{latest_cycle_ts}: {exit_count} protective exits triggered "
-                                "(Ornstein-Uhlenbeck convergence / Lot-1 stop-loss). Opportunity "
-                                "to tighten pre-entry quality & earnings accrual filter."
-                            ),
+                            summary=summary_text,
                             quantitative_mechanism=(
-                                "Pre-entry Sloan accrual & idiosyncratic drawdown filter "
-                                "calibrated on live exits"
+                                "Pre-entry Sloan accrual, net-leverage distress & Lot-1 "
+                                "stop-loss tail filter calibrated on live execution events"
                             ),
-                            suggested_subsystem=TargetSubsystem.PRESCREEN,
+                            suggested_subsystem=subsys,
                         )
                     )
             except sqlite3.Error:
@@ -424,28 +536,68 @@ class LivePortfolioPostmortemScanner:
                 with sqlite3.connect(self._journal_db) as conn:
                     row = conn.execute("SELECT COUNT(*) FROM predictions").fetchone()
                     pred_count = int(row[0] or 0) if row else 0
-                token = f"journal:{pred_count}:{as_of.isoformat()}"
+                    has_settlements = (
+                        conn.execute(
+                            "SELECT 1 FROM sqlite_master "
+                            "WHERE type = 'table' AND name = 'settlements'"
+                        ).fetchone()
+                        is not None
+                    )
+                    settled_count = 0
+                    brier = 0.0
+                    hit_rate = 0.0
+                    mean_alpha_net = 0.0
+                    if has_settlements:
+                        s_row = conn.execute(
+                            "SELECT COUNT(*), "
+                            "AVG((p.probability - s.outcome) * (p.probability - s.outcome)), "
+                            "AVG(s.outcome), AVG(s.alpha_net) "
+                            "FROM settlements s "
+                            "JOIN predictions p ON p.prediction_id = s.prediction_id"
+                        ).fetchone()
+                        if s_row and int(s_row[0] or 0) > 0:
+                            settled_count = int(s_row[0] or 0)
+                            brier = float(s_row[1] or 0.0)
+                            hit_rate = float(s_row[2] or 0.0)
+                            mean_alpha_net = float(s_row[3] or 0.0)
+
+                if settled_count > 0:
+                    token = f"journal:{pred_count}:{settled_count}"
+                    j_title = (
+                        f"Forecast journal calibration audit ({pred_count} predictions, "
+                        f"{settled_count} settled: Brier={brier:.4f}, "
+                        f"hit={hit_rate * 100:.1f}%, alpha_net={mean_alpha_net * 100:+.2f}%)"
+                    )
+                    j_summary = (
+                        f"Journal contains {pred_count} PIT forecasts ({settled_count} settled): "
+                        f"realized Brier score={brier:.4f}, hit rate={hit_rate * 100:.1f}%, "
+                        f"mean net alpha={mean_alpha_net * 100:+.2f}%. Opportunity for Empirical "
+                        "Bayes confidence shrinkage conditioned on PIT cash-flow quality."
+                    )
+                else:
+                    token = f"journal:{pred_count}:{as_of.isoformat()}"
+                    j_title = (
+                        f"Forecast journal calibration audit ({pred_count} recorded predictions)"
+                    )
+                    j_summary = (
+                        f"Journal contains {pred_count} PIT forecasts; monitor Brier "
+                        "skill score and Waudby-Smith & Ramdas (2024) wealth e-process "
+                        "drift."
+                    )
                 if pred_count > 0 and wm.get("postmortem:journal") != token:
                     signals.append(
                         DiscoverySignal(
                             signal_id=f"postmortem-journal-{as_of.isoformat()}",
                             source_kind=DiscoverySourceKind.LIVE_POSTMORTEM,
                             source_name="data/journal.db",
-                            title=(
-                                f"Forecast journal calibration audit "
-                                f"({pred_count} recorded predictions)"
-                            ),
+                            title=j_title,
                             reference_uri=str(self._journal_db),
                             observed_at=as_of,
                             watermark_token=token,
-                            summary=(
-                                f"Journal contains {pred_count} PIT forecasts; monitor Brier "
-                                "skill score and Waudby-Smith & Ramdas (2024) wealth e-process "
-                                "drift."
-                            ),
+                            summary=j_summary,
                             quantitative_mechanism=(
                                 "E_t = prod_{k=1}^t (1 + lambda_k * y_k) anytime-valid "
-                                "calibration gate"
+                                "calibration gate & Empirical Bayes probability shrinkage"
                             ),
                             suggested_subsystem=TargetSubsystem.CALIBRATION,
                         )
@@ -454,3 +606,167 @@ class LivePortfolioPostmortemScanner:
                 pass
 
         return tuple(signals)
+
+
+_PIT_ABLATION_FIELDS: frozenset[str] = frozenset(
+    {
+        "net_income",
+        "operating_cash_flow",
+        "assets",
+        "capex",
+        "stockholders_equity",
+        "operating_income",
+        "long_term_debt",
+        "cash",
+    }
+)
+
+
+def load_empirical_ablation_panel(
+    *,
+    journal_db_path: Path | None,
+    execution_db_path: Path | None = None,
+    pit_dir: Path | None = None,
+    as_of: date | None = None,
+    cohort_size: int = 6,
+) -> EmpiricalAblationPanel:
+    """Load Point-in-Time settled forecast & fundamental panel for committee ablations.
+
+    Enforces ``observed_at <= knowledge_date`` on every SEC EDGAR XBRL fact read
+    from ``pit_dir/<ticker>/facts.parquet``.
+    """
+    if journal_db_path is None or not journal_db_path.is_file():
+        return EmpiricalAblationPanel(samples=(), cohort_size=cohort_size)
+
+    try:
+        with sqlite3.connect(journal_db_path) as conn:
+            has_settlements = (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settlements'"
+                ).fetchone()
+                is not None
+            )
+            if not has_settlements:
+                return EmpiricalAblationPanel(samples=(), cohort_size=cohort_size)
+            if as_of is not None:
+                rows = conn.execute(
+                    "SELECT p.ticker, p.knowledge_date, p.probability, "
+                    "s.alpha_gross, s.alpha_net "
+                    "FROM settlements s "
+                    "JOIN predictions p ON p.prediction_id = s.prediction_id "
+                    "WHERE p.knowledge_date <= ? "
+                    "ORDER BY p.recorded_at, p.prediction_id",
+                    (as_of.isoformat(),),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT p.ticker, p.knowledge_date, p.probability, "
+                    "s.alpha_gross, s.alpha_net "
+                    "FROM settlements s "
+                    "JOIN predictions p ON p.prediction_id = s.prediction_id "
+                    "ORDER BY p.recorded_at, p.prediction_id"
+                ).fetchall()
+    except sqlite3.Error:
+        return EmpiricalAblationPanel(samples=(), cohort_size=cohort_size)
+
+    if not rows:
+        return EmpiricalAblationPanel(samples=(), cohort_size=cohort_size)
+
+    hard_stop_tickers: set[str] = set()
+    if execution_db_path is not None and execution_db_path.is_file():
+        try:
+            with sqlite3.connect(execution_db_path) as exec_conn:
+                has_exec = (
+                    exec_conn.execute(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE type = 'table' AND name = 'execution_events'"
+                    ).fetchone()
+                    is not None
+                )
+                if has_exec:
+                    stop_rows = exec_conn.execute(
+                        "SELECT DISTINCT ticker FROM execution_events "
+                        "WHERE detail LIKE '%stop_loss_exit%'"
+                    ).fetchall()
+                    hard_stop_tickers = {str(r[0]) for r in stop_rows if r and r[0]}
+        except sqlite3.Error:
+            pass
+
+    pit_tables: dict[str, list[tuple[str, float, str, str]]] = {}
+    if pit_dir is not None and pit_dir.is_dir():
+        distinct_tickers = sorted({str(r[0]) for r in rows if r and r[0]})
+        for tkr in distinct_tickers:
+            pq_path = pit_dir / tkr / "facts.parquet"
+            if not pq_path.is_file():
+                continue
+            try:
+                tbl = pq.read_table(
+                    pq_path, columns=["field", "value", "as_of", "observed_at"]
+                )
+                fact_rows: list[tuple[str, float, str, str]] = []
+                for f, v, ao, obs in zip(
+                    tbl["field"].to_pylist(),
+                    tbl["value"].to_pylist(),
+                    tbl["as_of"].to_pylist(),
+                    tbl["observed_at"].to_pylist(),
+                    strict=False,
+                ):
+                    f_str = str(f)
+                    if f_str in _PIT_ABLATION_FIELDS and v is not None:
+                        fact_rows.append((f_str, float(v), str(ao), str(obs)))
+                pit_tables[tkr] = fact_rows
+            except Exception:
+                continue
+
+    ratio_cache: dict[tuple[str, str], tuple[float, float, float, float]] = {}
+    samples: list[EmpiricalTradeSample] = []
+    for raw_tkr, raw_kd, raw_prob, raw_ag, raw_an in rows:
+        tkr = str(raw_tkr)
+        kd_str = str(raw_kd)[:10]
+        try:
+            kd_date = date.fromisoformat(kd_str)
+        except ValueError:
+            continue
+
+        cache_key = (tkr, kd_str)
+        if cache_key not in ratio_cache:
+            latest_vals: dict[str, tuple[tuple[str, str], float]] = {}
+            for f_str, val, ao_str, obs_str in pit_tables.get(tkr, ()):
+                if obs_str <= kd_str:
+                    ord_key = (ao_str, obs_str)
+                    prev = latest_vals.get(f_str)
+                    if prev is None or ord_key >= prev[0]:
+                        latest_vals[f_str] = (ord_key, val)
+            d = {k: v[1] for k, v in latest_vals.items()}
+            assets = d.get("assets", 0.0)
+            ni = d.get("net_income", 0.0)
+            ocf = d.get("operating_cash_flow", 0.0)
+            capex = abs(d.get("capex", 0.0))
+            eq = d.get("stockholders_equity", 0.0)
+            oi = d.get("operating_income", 0.0)
+            debt = max(d.get("long_term_debt", 0.0), 0.0)
+            cash = max(d.get("cash", 0.0), 0.0)
+
+            accrual = (ni - ocf) / assets if assets > 0.0 else 0.0
+            fcf_roe = float(max(-0.5, min(1.0, (ocf - capex) / eq))) if eq > 0.0 else 0.0
+            roa_oi = oi / assets if assets > 0.0 else 0.0
+            net_lev = (debt - cash) / assets if assets > 0.0 else 0.0
+            ratio_cache[cache_key] = (accrual, fcf_roe, roa_oi, net_lev)
+
+        accrual, fcf_roe, roa_oi, net_lev = ratio_cache[cache_key]
+        samples.append(
+            EmpiricalTradeSample(
+                ticker=tkr,
+                knowledge_date=kd_date,
+                probability=max(0.0, min(1.0, float(raw_prob))),
+                alpha_gross=float(raw_ag),
+                alpha_net=float(raw_an),
+                accrual_ratio=accrual,
+                fcf_roe=fcf_roe,
+                roa_operating=roa_oi,
+                net_leverage=net_lev,
+                had_protective_stop_exit=(tkr in hard_stop_tickers),
+            )
+        )
+
+    return EmpiricalAblationPanel(samples=tuple(samples), cohort_size=cohort_size)

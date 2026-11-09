@@ -52,6 +52,7 @@ class AlphaResearchRunOptions:
     execution_db: Path
     journal_db: Path
     plans_dir: Path
+    pit_dir: Path | None = None
     out_plan_path: Path | None = None
     sources: tuple[DiscoverySourceKind, ...] = (
         DiscoverySourceKind.LOCAL_REPO,
@@ -140,6 +141,7 @@ def run_alpharesearch_run(
     """Execute one weekly AlphaResearch committee cycle."""
     try:
         store = SQLiteAlphaResearchStore(opts.db_path)
+        pit_dir = opts.pit_dir if opts.pit_dir is not None else (opts.journal_db.parent / "pit")
         runner = AlphaResearchRunner(
             store=store,
             local_scanner=LocalReferenceRepoScanner(opts.reference_dir),
@@ -150,6 +152,9 @@ def run_alpharesearch_run(
                 opts.journal_db,
             ),
             plans_dir=opts.plans_dir,
+            journal_db_path=opts.journal_db,
+            execution_db_path=opts.execution_db,
+            pit_dir=pit_dir,
         )
         report = runner.run_weekly_cycle(
             as_of=opts.as_of,

@@ -39,7 +39,9 @@ __all__ = [
     "CommitteeDecision",
     "DiscoverySignal",
     "DiscoverySourceKind",
+    "EmpiricalAblationPanel",
     "EmpiricalScorecard",
+    "EmpiricalTradeSample",
     "ProposalDecisionStatus",
     "ResearchProposal",
     "SkepticCritique",
@@ -280,3 +282,35 @@ class AlphaResearchRunReport(BaseModel):
     def rejected_decisions(self) -> tuple[CommitteeDecision, ...]:
         """Return proposals vetoed by the Skeptic or Empirical Gatekeeper."""
         return tuple(d for d in self.decisions if not d.promoted)
+
+
+class EmpiricalTradeSample(BaseModel):
+    """Immutable Point-in-Time settled trade sample for empirical ablations."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ticker: str = Field(min_length=1)
+    knowledge_date: date
+    probability: float = Field(ge=0.0, le=1.0)
+    alpha_gross: float
+    alpha_net: float
+    accrual_ratio: float = 0.0
+    fcf_roe: float = 0.0
+    roa_operating: float = 0.0
+    net_leverage: float = 0.0
+    had_protective_stop_exit: bool = False
+
+
+class EmpiricalAblationPanel(BaseModel):
+    """Immutable cross-sectional cohort panel for out-of-sample ablations."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    samples: tuple[EmpiricalTradeSample, ...] = ()
+    cohort_size: int = Field(default=6, ge=2)
+
+    @property
+    def n_cohorts(self) -> int:
+        """Return the number of complete sequential cohorts in the panel."""
+        return len(self.samples) // self.cohort_size
+

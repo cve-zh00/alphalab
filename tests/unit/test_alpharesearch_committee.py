@@ -187,13 +187,39 @@ def test_source_scanners_local_remote_and_academic_with_offline_resilience(
         RemoteGitHubRepoScanner,
     )
 
-    # 1. LocalReferenceRepoScanner on the workspace reference directory
-    local_scanner = LocalReferenceRepoScanner(Path("reference"))
+    # 1. LocalReferenceRepoScanner on a temporary reference directory with a git repo
+    ref_dir = tmp_path / "reference"
+    repo_dir = ref_dir / "finrobot"
+    repo_dir.mkdir(parents=True)
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+    (repo_dir / "README.md").write_text("# FinRobot\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "feat: add multi-agent valuation"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+    local_scanner = LocalReferenceRepoScanner(ref_dir)
     local_signals = local_scanner.scan(as_of=date(2026, 10, 31), watermarks={})
     assert len(local_signals) >= 1
     assert local_signals[0].source_kind is DiscoverySourceKind.LOCAL_REPO
 
-    # 2. RemoteGitHubRepoScanner with mocked HTTP response and fallback
+    # 2. RemoteGitHubRepoScanner & AcademicPaperScanner with mocked httpx.get
     class _FakeResp:
         def __init__(self, status_code: int, payload: object, text: str = "") -> None:
             self.status_code = status_code
@@ -203,44 +229,34 @@ def test_source_scanners_local_remote_and_academic_with_offline_resilience(
         def json(self) -> object:
             return self._payload
 
-    class _FakeClient:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            pass
-
-        def __enter__(self) -> _FakeClient:
-            return self
-
-        def __exit__(self, *args: object) -> None:
-            pass
-
-        def get(self, url: str, **kwargs: object) -> _FakeResp:
-            if "api.github.com" in url:
-                return _FakeResp(
-                    200,
-                    [
-                        {
-                            "sha": "abc1234567890",
-                            "commit": {
-                                "message": "feat: tighten drawdown guard\nDetails",
-                                "committer": {"date": "2026-10-30T12:00:00Z"},
-                            },
-                        }
-                    ],
-                )
-            atom_xml = """<?xml version="1.0" encoding="UTF-8"?>
-            <feed xmlns="http://www.w3.org/2005/Atom">
-              <entry>
-                <id>http://arxiv.org/abs/2610.99999v1</id>
-                <published>2026-10-29T00:00:00Z</published>
-                <title>Deflated Sharpe Ratio and Portfolio Shrinkage</title>
-                <summary>Empirical Bayes shrinkage with transaction cost bands.</summary>
-              </entry>
-            </feed>"""
-            return _FakeResp(200, {}, text=atom_xml)
+    def _fake_get(url: str, **kwargs: object) -> _FakeResp:
+        if "api.github.com" in url:
+            return _FakeResp(
+                200,
+                [
+                    {
+                        "sha": "abc1234567890",
+                        "commit": {
+                            "message": "feat: tighten drawdown guard\nDetails",
+                            "committer": {"date": "2026-10-30T12:00:00Z"},
+                        },
+                    }
+                ],
+            )
+        atom_xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <feed xmlns="http://www.w3.org/2005/Atom">
+          <entry>
+            <id>http://arxiv.org/abs/2610.99999v1</id>
+            <published>2026-10-29T00:00:00Z</published>
+            <title>Deflated Sharpe Ratio and Portfolio Shrinkage</title>
+            <summary>Empirical Bayes shrinkage with transaction cost bands.</summary>
+          </entry>
+        </feed>"""
+        return _FakeResp(200, {}, text=atom_xml)
 
     import httpx
 
-    monkeypatch.setattr(httpx, "Client", _FakeClient)  # type: ignore[attr-defined]
+    monkeypatch.setattr(httpx, "get", _fake_get)  # type: ignore[attr-defined]
 
     remote_scanner = RemoteGitHubRepoScanner(repos=("NoFxAiOS/nofx",))
     remote_signals = remote_scanner.scan(as_of=date(2026, 10, 31), watermarks={})
@@ -251,4 +267,202 @@ def test_source_scanners_local_remote_and_academic_with_offline_resilience(
     paper_signals = paper_scanner.scan(as_of=date(2026, 10, 31), watermarks={})
     assert len(paper_signals) >= 1
     assert paper_signals[0].source_kind is DiscoverySourceKind.ACADEMIC_PAPER
+
+
+def test_remote_scanner_skips_non_quant_commits_like_telegram_links(
+    monkeypatch: object,
+) -> None:
+    import httpx
+
+    from alphalab.adapters.alpharesearch_sources import RemoteGitHubRepoScanner
+
+    class _FakeResp:
+        def __init__(self, status_code: int, payload: object) -> None:
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self) -> object:
+            return self._payload
+
+    def _fake_get(url: str, **kwargs: object) -> _FakeResp:
+        assert "per_page=10" in url
+        return _FakeResp(
+            200,
+            [
+                {
+                    "sha": "65e9037000000000",
+                    "commit": {
+                        "message": "fix: restore Telegram community links without bot integration"
+                    },
+                },
+                {
+                    "sha": "a949bf9111111111",
+                    "commit": {
+                        "message": "refactor: tighten drawdown and stop-loss risk guard parameters"
+                    },
+                },
+            ],
+        )
+
+    monkeypatch.setattr(httpx, "get", _fake_get)  # type: ignore[attr-defined]
+    scanner = RemoteGitHubRepoScanner(repos=("NoFxAiOS/nofx",))
+    signals = scanner.scan(as_of=date(2026, 11, 6), watermarks={})
+    assert len(signals) == 1
+    assert signals[0].watermark_token == "a949bf9111111111"
+    assert "Telegram" not in signals[0].title
+
+
+def test_postmortem_scanner_reads_execution_events_and_settlements_and_panel_enforces_pit(
+    tmp_path: Path,
+) -> None:
+    import sqlite3
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from alphalab.adapters.alpharesearch_sources import (
+        LivePortfolioPostmortemScanner,
+        load_empirical_ablation_panel,
+    )
+
+    exec_db = tmp_path / "execution.db"
+    journal_db = tmp_path / "journal.db"
+    pit_dir = tmp_path / "pit"
+    (pit_dir / "AAPL").mkdir(parents=True)
+    (pit_dir / "TRAP").mkdir(parents=True)
+
+    with sqlite3.connect(exec_db) as conn:
+        conn.execute(
+            "CREATE TABLE execution_events ("
+            "event_id TEXT PRIMARY KEY, cycle_id TEXT, recorded_at TEXT, "
+            "kind TEXT, ticker TEXT, side TEXT, shares REAL, reference_price REAL, "
+            "client_order_id TEXT, broker_order_id TEXT, detail TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO execution_events VALUES "
+            "('e1', 'c1', '2026-10-20T14:00:00Z', 'filled', 'AAPL', 'BUY', 10, 200.0, "
+            "'co1', 'bo1', 'filled')"
+        )
+        conn.execute(
+            "INSERT INTO execution_events VALUES "
+            "('e2', 'c2', '2026-10-25T14:00:00Z', 'rejected', 'TRAP', 'SELL', 10, 90.0, "
+            "'co2', 'bo2', 'stop_loss_exit triggered')"
+        )
+        conn.execute(
+            "INSERT INTO execution_events VALUES "
+            "('e3', 'c3', '2026-10-28T14:00:00Z', 'rejected', 'MSFT', 'SELL', 5, 400.0, "
+            "'co3', 'bo3', 'drawdown_exit triggered')"
+        )
+
+    with sqlite3.connect(journal_db) as conn:
+        conn.execute(
+            "CREATE TABLE predictions ("
+            "prediction_id TEXT PRIMARY KEY, recorded_at TEXT, ticker TEXT, "
+            "direction TEXT, probability REAL, horizon INTEGER, entry_price REAL, "
+            "knowledge_date TEXT, llm_version TEXT, llm_cutoff TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE settlements ("
+            "prediction_id TEXT PRIMARY KEY, settled_at TEXT, realized_return REAL, "
+            "benchmark_return REAL, alpha_gross REAL, alpha_net REAL, outcome INTEGER)"
+        )
+        for i in range(180):
+            is_good = (i % 3) != 0
+            tkr = "AAPL" if is_good else "TRAP"
+            pid = f"pred-{i:03d}"
+            prob = 0.68 if is_good else 0.72
+            alpha_g = 0.032 if is_good else -0.028
+            alpha_n = 0.030 if is_good else -0.031
+            outcome = 1 if is_good else 0
+            conn.execute(
+                "INSERT INTO predictions VALUES (?, ?, ?, 'LONG', ?, 21, 100.0, '2026-10-15', "
+                "'v1', '2026-01-01')",
+                (pid, f"2026-10-15T10:{i % 60:02d}:00Z", tkr, prob),
+            )
+            conn.execute(
+                "INSERT INTO settlements VALUES (?, '2026-11-05T16:00:00Z', ?, 0.01, ?, ?, ?)",
+                (pid, alpha_g + 0.01, alpha_g, alpha_n, outcome),
+            )
+
+    # Write PIT facts for AAPL (strong cash flow, negative accruals) and
+    # TRAP (high accruals + post-knowledge_date leaked restatement that must be ignored)
+    aapl_tbl = pa.table(
+        {
+            "field": [
+                "assets",
+                "net_income",
+                "operating_cash_flow",
+                "capex",
+                "stockholders_equity",
+                "operating_income",
+                "long_term_debt",
+                "cash",
+            ],
+            "value": [1000.0, 120.0, 165.0, 20.0, 400.0, 150.0, 80.0, 120.0],
+            "as_of": ["2026-09-30"] * 8,
+            "observed_at": ["2026-10-01"] * 8,
+        }
+    )
+    pq.write_table(aapl_tbl, pit_dir / "AAPL" / "facts.parquet")
+
+    trap_tbl = pa.table(
+        {
+            "field": [
+                "assets",
+                "net_income",
+                "operating_cash_flow",
+                "capex",
+                "stockholders_equity",
+                "operating_income",
+                "long_term_debt",
+                "cash",
+                # Future filing observed AFTER 2026-10-15 (must be ignored by PIT filter)
+                "operating_cash_flow",
+            ],
+            "value": [1000.0, 110.0, 5.0, 40.0, 300.0, 15.0, 450.0, 20.0, 900.0],
+            "as_of": ["2026-09-30"] * 8 + ["2026-10-20"],
+            "observed_at": ["2026-10-01"] * 8 + ["2026-10-25"],
+        }
+    )
+    pq.write_table(trap_tbl, pit_dir / "TRAP" / "facts.parquet")
+
+    scanner = LivePortfolioPostmortemScanner(exec_db, journal_db)
+    sigs = scanner.scan(as_of=date(2026, 11, 6), watermarks={})
+    assert len(sigs) == 2
+    assert "3 cycles" in sigs[0].title
+    assert "1 stop-loss" in sigs[0].title
+    assert "180 settled" in sigs[1].title
+
+    panel = load_empirical_ablation_panel(
+        journal_db_path=journal_db,
+        execution_db_path=exec_db,
+        pit_dir=pit_dir,
+        as_of=date(2026, 11, 6),
+        cohort_size=6,
+    )
+    assert len(panel.samples) == 180
+    assert panel.n_cohorts == 30
+    trap_sample = next(s for s in panel.samples if s.ticker == "TRAP")
+    # PIT check: operating_cash_flow=900 observed on 2026-10-25 (> 2026-10-15) must NOT leak
+    assert abs(trap_sample.accrual_ratio - (110.0 - 5.0) / 1000.0) < 1e-9
+    assert trap_sample.had_protective_stop_exit is True
+
+    proposals = synthesize_proposals_from_signals(sigs, seed=42, ablation_panel=panel)
+    assert len(proposals) == 4
+    d0 = judge_proposal(proposals[0], prior_n_trials=0, rng=np.random.default_rng(42))
+    assert d0.status is ProposalDecisionStatus.PROMOTED_TO_PLAN
+
+    # Verify that on a subsequent cycle with excluded_proposal_ids set to the first 4 IDs,
+    # synthesize_proposals_from_signals does not re-emit the 4 canonical proposals and instead
+    # synthesizes the empirical postmortem proposals.
+    first_cycle_ids = frozenset(p.proposal_id for p in proposals)
+    next_proposals = synthesize_proposals_from_signals(
+        sigs,
+        seed=42,
+        ablation_panel=panel,
+        excluded_proposal_ids=first_cycle_ids,
+    )
+    assert len(next_proposals) == 2
+    assert all(p.proposal_id not in first_cycle_ids for p in next_proposals)
+
 
