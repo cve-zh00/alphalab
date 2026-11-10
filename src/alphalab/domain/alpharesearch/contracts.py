@@ -37,6 +37,7 @@ __all__ = [
     "AblationEvidence",
     "AlphaResearchRunReport",
     "CommitteeDecision",
+    "CommitteeDeliberationNote",
     "DiscoverySignal",
     "DiscoverySourceKind",
     "EmpiricalAblationPanel",
@@ -202,6 +203,17 @@ class ResearchProposal(BaseModel):
             expected_sharpe_gain=expected_sharpe_gain,
             ablation_evidence=ablation_evidence or AblationEvidence(),
         )
+
+
+class CommitteeDeliberationNote(BaseModel):
+    """Immutable LLM deliberation note for Role 1 (Scout) and Role 2 (Skeptic)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    proposal_index: int = Field(ge=0)
+    scout_rationale: str = Field(min_length=1)
+    skeptic_audit_note: str = Field(min_length=1)
+    recommended_safeguard: str = Field(min_length=1)
 
 
 class SkepticCritique(BaseModel):

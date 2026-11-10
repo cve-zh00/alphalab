@@ -23,6 +23,7 @@ import numpy as np
 
 from alphalab.domain.alpharesearch.contracts import (
     CommitteeDecision,
+    CommitteeDeliberationNote,
     EmpiricalScorecard,
     ProposalDecisionStatus,
     ResearchProposal,
@@ -71,6 +72,7 @@ def run_skeptic_review(
     *,
     rejected_proposal_ids: frozenset[str] = frozenset(),
     promoted_proposal_ids: frozenset[str] = frozenset(),
+    deliberation_note: CommitteeDeliberationNote | None = None,
     max_loc_delta: int = MAX_COMPLEXITY_LOC_DELTA,
     max_turnover_increase_pct: float = MAX_TURNOVER_INCREASE_PCT,
 ) -> SkepticCritique:
@@ -213,8 +215,20 @@ def run_skeptic_review(
     )
 
     veto_reasons = tuple(f"{f.check}: {f.message}" for f in findings if not f.passed)
+    n_hard_checks = len(findings)
+    if deliberation_note is not None:
+        findings.append(
+            AuditFinding(
+                check="alpharesearch.skeptic.llm_adversarial_audit",
+                passed=True,
+                severity=Severity.SOFT,
+                message=deliberation_note.skeptic_audit_note,
+                values=(),
+            )
+        )
+        safeguards.append(f"[SkepticReviewer LLM] {deliberation_note.recommended_safeguard}")
     n_failed = len(veto_reasons)
-    base_risk = min(1.0, n_failed / len(findings))
+    base_risk = min(1.0, n_failed / max(1, n_hard_checks))
     complexity_bump = min(0.25, max(0, proposal.estimated_loc_delta) / 1000.0)
     risk_score = round(min(1.0, base_risk + (0.0 if n_failed else complexity_bump)), 4)
 
@@ -375,6 +389,7 @@ def judge_proposal(
     rng: np.random.Generator,
     rejected_proposal_ids: frozenset[str] = frozenset(),
     promoted_proposal_ids: frozenset[str] = frozenset(),
+    deliberation_note: CommitteeDeliberationNote | None = None,
     trial_id: str | None = None,
     trial_sharpe_std: float | None = None,
 ) -> CommitteeDecision:
@@ -383,6 +398,7 @@ def judge_proposal(
         proposal,
         rejected_proposal_ids=rejected_proposal_ids,
         promoted_proposal_ids=promoted_proposal_ids,
+        deliberation_note=deliberation_note,
     )
     scorecard = run_empirical_gatekeeper(
         proposal,

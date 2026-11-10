@@ -150,6 +150,7 @@ def test_runner_and_cli_end_to_end_persists_plan_and_graveyard(tmp_path: Path) -
             str(plans_dir),
             "--out",
             str(out_plan),
+            "--no-llm",
         ],
         out=out,
         err=err,
@@ -464,5 +465,82 @@ def test_postmortem_scanner_reads_execution_events_and_settlements_and_panel_enf
     )
     assert len(next_proposals) == 2
     assert all(p.proposal_id not in first_cycle_ids for p in next_proposals)
+    assert len(next_proposals[0].ablation_evidence.configuration_matrix_rows) == 30
+    assert len(next_proposals[0].ablation_evidence.configuration_matrix_rows[0]) == 8
+
+    # Cycle 3: when both cycle 1 and cycle 2 IDs are excluded, signal-driven proposals
+    # are synthesized so repeated runs never emit 0 proposals.
+    second_cycle_ids = first_cycle_ids | frozenset(p.proposal_id for p in next_proposals)
+    third_proposals = synthesize_proposals_from_signals(
+        sigs,
+        seed=42,
+        ablation_panel=panel,
+        excluded_proposal_ids=second_cycle_ids,
+    )
+    assert len(third_proposals) == 4
+    assert all(p.proposal_id not in second_cycle_ids for p in third_proposals)
+
+
+def test_runner_integrates_committee_llm_deliberation_and_progress_callbacks(
+    tmp_path: Path,
+) -> None:
+    from collections.abc import Sequence
+
+    from alphalab.app.alpharesearch_runner import AlphaResearchRunner
+    from alphalab.domain.alpharesearch import CommitteeDeliberationNote
+
+    class _FakePaperScanner:
+        def scan(
+            self, *, as_of: date, watermarks: dict[str, str]
+        ) -> tuple[DiscoverySignal, ...]:
+            return (_sample_signal(),)
+
+    class _FakeCommitteeLLM:
+        model_name = "qwen3.8:27b-mlx"
+
+        def deliberate(
+            self,
+            *,
+            signals: Sequence[DiscoverySignal],
+            proposals: Sequence[ResearchProposal],
+        ) -> dict[int, CommitteeDeliberationNote]:
+            return {
+                idx: CommitteeDeliberationNote(
+                    proposal_index=idx,
+                    scout_rationale=f"Tesis cuantitativa validada contra {signals[0].title}.",
+                    skeptic_audit_note="Sin fuga temporal PIT detectada en el operador.",
+                    recommended_safeguard="Verificar invarianza con test_pit_no_leakage.",
+                )
+                for idx in range(len(proposals))
+            }
+
+    store = SQLiteAlphaResearchStore(tmp_path / "ar.db")
+    plan_out = tmp_path / "plan.md"
+    runner = AlphaResearchRunner(
+        store=store,
+        paper_scanner=_FakePaperScanner(),  # type: ignore[arg-type]
+        committee_llm=_FakeCommitteeLLM(),
+        plans_dir=tmp_path / "plans",
+    )
+    progress_msgs: list[str] = []
+    report = runner.run_weekly_cycle(
+        as_of=date(2026, 11, 9),
+        sources=(DiscoverySourceKind.ACADEMIC_PAPER,),
+        output_plan_path=plan_out,
+        progress_callback=progress_msgs.append,
+    )
+    assert len(progress_msgs) == 4
+    assert "[3/4]" in progress_msgs[2]
+    assert "qwen3.8:27b-mlx" in progress_msgs[2]
+    assert len(report.promoted_decisions) == 2
+    assert "[ScoutProposer LLM]" in report.promoted_decisions[0].proposal.problem_statement
+    assert any(
+        "[SkepticReviewer LLM]" in sg
+        for sg in report.promoted_decisions[0].skeptic_critique.required_safeguards
+    )
+    md = plan_out.read_text(encoding="utf-8")
+    assert "Salvaguardas exigidas (`SkepticReviewer`):" in md
+    assert "[SkepticReviewer LLM]" in md
+
 
 

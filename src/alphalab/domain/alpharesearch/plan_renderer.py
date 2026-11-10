@@ -105,6 +105,10 @@ def render_weekly_plan_md(report: AlphaResearchRunReport) -> str:
                 f"- **Archivos objetivo:** {', '.join(f'`{f}`' for f in prop.affected_files)}"
             )
             lines.append(f"- **Certificación del Comité:** {_format_scorecard_line(decision)}")
+            if decision.skeptic_critique.required_safeguards:
+                lines.append("- **Salvaguardas exigidas (`SkepticReviewer`):**")
+                for sg in decision.skeptic_critique.required_safeguards:
+                    lines.append(f"  - {sg}")
             lines.append("- **Pasos de implementación:**")
             for step in prop.implementation_todos:
                 lines.append(f"  - {step}")

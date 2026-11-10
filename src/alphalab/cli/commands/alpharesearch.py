@@ -8,6 +8,7 @@ from datetime import date
 from pathlib import Path
 from typing import TextIO
 
+from alphalab.adapters.alpharesearch_llm import OllamaAlphaResearchCommittee
 from alphalab.adapters.alpharesearch_sources import (
     AcademicPaperScanner,
     LivePortfolioPostmortemScanner,
@@ -61,6 +62,7 @@ class AlphaResearchRunOptions:
         DiscoverySourceKind.LIVE_POSTMORTEM,
     )
     ignore_watermarks: bool = False
+    no_llm: bool = False
     as_json: bool = False
     no_color: bool = False
 
@@ -116,13 +118,23 @@ def _render_report_console(report: AlphaResearchRunReport, *, out: TextIO) -> No
     for d in report.decisions:
         prop = d.proposal
         sc = d.empirical_scorecard
-        dsr_txt = f"DSR={sc.dsr:.3f}" if sc.dsr is not None else f"mode={sc.evaluation_mode}"
+        if sc.dsr is not None and sc.pbo is not None:
+            dsr_txt = f"DSR={sc.dsr:.3f}  PBO={sc.pbo:.3f}"
+        elif sc.dsr is not None:
+            dsr_txt = f"DSR={sc.dsr:.3f}"
+        else:
+            dsr_txt = f"mode={sc.evaluation_mode}"
         print(
             f"    [{d.status.value.upper()}] {prop.proposal_id} ({prop.subsystem.value}) "
             f"{prop.title} — {dsr_txt}",
             file=out,
         )
         print(f"      reason: {d.summary_reason}", file=out)
+        llm_sgs = [
+            sg for sg in d.skeptic_critique.required_safeguards if sg.startswith("[SkepticReviewer")
+        ]
+        for sg in llm_sgs:
+            print(f"      safeguard: {sg}", file=out)
 
     print(
         f"  SUMMARY: promoted={len(report.promoted_decisions)}  "
@@ -142,6 +154,7 @@ def run_alpharesearch_run(
     try:
         store = SQLiteAlphaResearchStore(opts.db_path)
         pit_dir = opts.pit_dir if opts.pit_dir is not None else (opts.journal_db.parent / "pit")
+        committee_llm = None if opts.no_llm else OllamaAlphaResearchCommittee()
         runner = AlphaResearchRunner(
             store=store,
             local_scanner=LocalReferenceRepoScanner(opts.reference_dir),
@@ -151,16 +164,23 @@ def run_alpharesearch_run(
                 opts.execution_db,
                 opts.journal_db,
             ),
+            committee_llm=committee_llm,
             plans_dir=opts.plans_dir,
             journal_db_path=opts.journal_db,
             execution_db_path=opts.execution_db,
             pit_dir=pit_dir,
         )
+
+        def _on_progress(msg: str) -> None:
+            if not opts.as_json:
+                print(f"  {msg}", file=out, flush=True)
+
         report = runner.run_weekly_cycle(
             as_of=opts.as_of,
             sources=opts.sources,
             ignore_watermarks=opts.ignore_watermarks,
             output_plan_path=opts.out_plan_path,
+            progress_callback=_on_progress,
         )
     except Exception as exc:
         print(f"error: alpharesearch run failed: {exc}", file=err)
@@ -280,6 +300,11 @@ def build_alpharesearch_parser(
         action="store_true",
         help="Scan all sources even if their commit/paper watermark was already seen.",
     )
+    run_p.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="Skip local Ollama LLM deliberation for ScoutProposer and SkepticReviewer.",
+    )
     run_p.add_argument("--json", action="store_true", help="Emit JSON output.")
     run_p.add_argument("--no-color", action="store_true", help="Disable ANSI colour.")
 
@@ -329,6 +354,7 @@ def dispatch_alpharesearch(
                 out_plan_path=args.out,
                 sources=sources,
                 ignore_watermarks=args.ignore_watermarks,
+                no_llm=args.no_llm,
                 as_json=args.json,
                 no_color=no_color,
             ),

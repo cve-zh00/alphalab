@@ -20,9 +20,10 @@ Coordinates:
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Protocol
 
 import numpy as np
 
@@ -38,6 +39,7 @@ from alphalab.domain.alpharesearch.contracts import (
     AblationEvidence,
     AlphaResearchRunReport,
     CommitteeDecision,
+    CommitteeDeliberationNote,
     DiscoverySignal,
     DiscoverySourceKind,
     EmpiricalAblationPanel,
@@ -47,9 +49,27 @@ from alphalab.domain.alpharesearch.contracts import (
 from alphalab.domain.alpharesearch.gate import judge_proposal
 from alphalab.domain.alpharesearch.plan_renderer import render_weekly_plan_md
 
-__all__ = ["AlphaResearchRunner", "synthesize_proposals_from_signals"]
+__all__ = [
+    "AlphaResearchRunner",
+    "CommitteeDeliberationPort",
+    "synthesize_proposals_from_signals",
+]
 
 _MIN_EMPIRICAL_COHORTS: int = 24
+_CSCV_GRID_SCALES: tuple[float, ...] = (0.0, 0.35, 0.55, 0.70, 0.85, 0.95, 1.00, 1.05)
+
+
+class CommitteeDeliberationPort(Protocol):
+    """Port for Role 1 (ScoutProposer) + Role 2 (SkepticReviewer) LLM deliberation."""
+
+    def deliberate(
+        self,
+        *,
+        signals: Sequence[DiscoverySignal],
+        proposals: Sequence[ResearchProposal],
+    ) -> dict[int, CommitteeDeliberationNote]:
+        """Return structured deliberation notes keyed by proposal index."""
+        ...
 
 
 def _simulate_ablation_series(
@@ -68,6 +88,17 @@ def _simulate_ablation_series(
     return baseline, challenger
 
 
+def _build_cscv_config_matrix(
+    baseline: tuple[float, ...],
+    challenger: tuple[float, ...],
+) -> tuple[tuple[float, ...], ...]:
+    """Build a ``T x 8`` hyperparameter tilt matrix between baseline and challenger."""
+    if not baseline or len(baseline) != len(challenger):
+        return ()
+    return tuple(
+        tuple(float(b + scale * (c - b)) for scale in _CSCV_GRID_SCALES)
+        for b, c in zip(baseline, challenger, strict=True)
+    )
 def _compute_empirical_ablation_series(
     panel: EmpiricalAblationPanel | None,
     *,
@@ -239,6 +270,7 @@ def _synthesize_postmortem_proposals(
                 ablation_evidence=AblationEvidence(
                     baseline_returns=base_e,
                     challenger_returns=chal_e,
+                    configuration_matrix_rows=_build_cscv_config_matrix(base_e, chal_e),
                     cost_bps_assumed=10.0,
                     turnover_delta_pct=-4.0,
                     invariants_verified=(
@@ -304,6 +336,7 @@ def _synthesize_postmortem_proposals(
                 ablation_evidence=AblationEvidence(
                     baseline_returns=base_j,
                     challenger_returns=chal_j,
+                    configuration_matrix_rows=_build_cscv_config_matrix(base_j, chal_j),
                     cost_bps_assumed=10.0,
                     turnover_delta_pct=-3.5,
                     invariants_verified=(
@@ -315,6 +348,220 @@ def _synthesize_postmortem_proposals(
         )
 
     return extra
+
+
+def _synthesize_signal_driven_proposals(
+    signals: Sequence[DiscoverySignal],
+    *,
+    ablation_panel: EmpiricalAblationPanel | None,
+    seed: int,
+    cycle_ordinal: int,
+) -> list[ResearchProposal]:
+    """Synthesize dynamic signal-grounded proposals when prior templates are exhausted."""
+    sig_primary = signals[0]
+    sig_secondary = signals[1] if len(signals) > 1 else signals[0]
+    sig_tail = signals[-1]
+
+    base_a, chal_a = _compute_empirical_ablation_series(
+        ablation_panel,
+        mode="postmortem_stop_loss_tail_guard",
+        fallback_seed=seed + 501 + cycle_ordinal,
+        fallback_n_obs=96,
+        fallback_drift=0.0017,
+        fallback_vol=0.0079,
+    )
+    base_b, chal_b = _compute_empirical_ablation_series(
+        ablation_panel,
+        mode="postmortem_calibration_shrinkage",
+        fallback_seed=seed + 503 + cycle_ordinal,
+        fallback_n_obs=96,
+        fallback_drift=0.0015,
+        fallback_vol=0.0077,
+    )
+    base_d, chal_d = _compute_empirical_ablation_series(
+        ablation_panel,
+        mode="short_horizon_reversal_3d",
+        fallback_seed=seed + 509 + cycle_ordinal,
+        fallback_n_obs=80,
+        fallback_drift=-0.0004,
+        fallback_vol=0.0095,
+    )
+
+    return [
+        ResearchProposal.create(
+            title=(
+                f"Modulador PIT de Volatilidad Realizada y Cobertura Lot-1 "
+                f"(Ciclo #{cycle_ordinal}: {sig_primary.title[:52]})"
+            ),
+            subsystem=TargetSubsystem.RISK_GUARDS,
+            source_signals=(sig_primary, sig_tail) if sig_primary != sig_tail else (sig_primary,),
+            problem_statement=(
+                f"A partir de la señal [{sig_primary.source_kind.value}] '{sig_primary.title}' "
+                "y el postmortem de salidas protectoras, se observa que emisores con alta deuda "
+                "neta sobre activos y baja cobertura operativa experimentan mayor frecuencia de "
+                "activación de stop-loss Lot-1."
+            ),
+            mathematical_formulation=(
+                f"w_{{i,t}}^{{adj}} = w_{{i,t}} * clip(1 - 0.45 * I(NetLev_{{i,t}} > 0.30 "
+                f"and ROA_{{op,i,t}} < 0.06), 0.50, 1.0) [ref={sig_primary.watermark_token}, "
+                f"cycle={cycle_ordinal}] con filed_at <= knowledge_date."
+            ),
+            falsifiable_hypothesis=(
+                "Atenuar preventivamente el peso inicial en emisores con apalancamiento neto "
+                "elevado y baja rentabilidad operativa reduce el drawdown y eleva el Sharpe neto "
+                "en la matriz CSCV de cohortes PIT."
+            ),
+            affected_files=(
+                "src/alphalab/domain/pit/features.py",
+                "src/alphalab/app/autopilot_runner.py",
+                "tests/unit/test_autopilot_runner.py",
+            ),
+            implementation_todos=(
+                (
+                    "Exponer predicado puro de fragilidad operativa/apalancamiento PIT en "
+                    "src/alphalab/domain/pit/features.py."
+                ),
+                (
+                    "Integrar factor de atenuación preventiva en AutopilotRunner "
+                    "manteniendo intacto el anclaje Lot-1."
+                ),
+            ),
+            pit_safe=True,
+            domain_pure=True,
+            llm_numeric_boundary_safe=True,
+            preserves_nofx_guards=True,
+            estimated_loc_delta=52,
+            expected_sharpe_gain=0.18,
+            ablation_evidence=AblationEvidence(
+                baseline_returns=base_a,
+                challenger_returns=chal_a,
+                configuration_matrix_rows=_build_cscv_config_matrix(base_a, chal_a),
+                cost_bps_assumed=10.0,
+                turnover_delta_pct=-4.0,
+                invariants_verified=(
+                    "pit_filed_at_le_knowledge_date",
+                    "lot1_stop_anchor_preserved",
+                ),
+            ),
+        ),
+        ResearchProposal.create(
+            title=(
+                f"Contracción Cuantílica Acotada por Conversión de Caja Libre PIT "
+                f"(Ciclo #{cycle_ordinal}: {sig_secondary.title[:48]})"
+            ),
+            subsystem=TargetSubsystem.CALIBRATION,
+            source_signals=(sig_secondary,),
+            problem_statement=(
+                f"Siguiendo la evidencia de [{sig_secondary.source_kind.value}] "
+                f"'{sig_secondary.title}', las probabilidades crudas alcistas presentan "
+                "dispersión excesiva cuando la conversión de flujo de caja libre sobre "
+                "patrimonio (FCF/Equity) es débil."
+            ),
+            mathematical_formulation=(
+                f"p_{{i,t}}^{{cal}} = 0.50 + lambda(FCF_ROE_{{i,t}}, Accrual_{{i,t}}) * "
+                f"(p_{{i,t}}^{{raw}} - 0.50) [ref={sig_secondary.watermark_token}, "
+                f"cycle={cycle_ordinal}] con filed_at <= knowledge_date."
+            ),
+            falsifiable_hypothesis=(
+                "Regularizar la probabilidad calibrada hacia 0.50 en función de FCF_ROE y "
+                "devengos PIT reduce el Brier score y mejora el Sharpe neto fuera de muestra."
+            ),
+            affected_files=(
+                "src/alphalab/domain/journal/calibration.py",
+                "tests/unit/test_calibration.py",
+            ),
+            implementation_todos=(
+                (
+                    "Implementar contracción cuantílica condicionada por FCF_ROE en "
+                    "src/alphalab/domain/journal/calibration.py."
+                ),
+                (
+                    "Añadir pruebas unitarias de monotonicidad y preservación de rango [0, 1]."
+                ),
+            ),
+            pit_safe=True,
+            domain_pure=True,
+            llm_numeric_boundary_safe=True,
+            preserves_nofx_guards=True,
+            estimated_loc_delta=46,
+            expected_sharpe_gain=0.15,
+            ablation_evidence=AblationEvidence(
+                baseline_returns=base_b,
+                challenger_returns=chal_b,
+                configuration_matrix_rows=_build_cscv_config_matrix(base_b, chal_b),
+                cost_bps_assumed=10.0,
+                turnover_delta_pct=-3.5,
+                invariants_verified=(
+                    "pit_filed_at_le_knowledge_date",
+                    "brier_monotonic_shrinkage",
+                ),
+            ),
+        ),
+        ResearchProposal.create(
+            title=(
+                f"Asignación Directa de Pesos de Cartera por Prompt Libre del LLM "
+                f"(Control Adversario #{cycle_ordinal})"
+            ),
+            subsystem=TargetSubsystem.VALUATION,
+            source_signals=(sig_primary,),
+            problem_statement=(
+                "Hipótesis de control adversario: delegar el cálculo directo de pesos y "
+                "precios objetivo al LLM sin pasar por operadores deterministas ni Dykstra."
+            ),
+            mathematical_formulation=(
+                f"w_{{i,t}}^{{LLM}} = LLM_DirectWeight(signal={sig_primary.watermark_token}, "
+                f"cycle={cycle_ordinal})"
+            ),
+            falsifiable_hypothesis=(
+                "Permitir pesos numéricos libres del LLM incrementa el retorno bruto intradía."
+            ),
+            affected_files=("src/alphalab/adapters/llm.py",),
+            implementation_todos=("Permitir pesos directos en salida libre del LLM.",),
+            pit_safe=True,
+            domain_pure=True,
+            llm_numeric_boundary_safe=False,
+            preserves_nofx_guards=True,
+            estimated_loc_delta=290,
+            expected_sharpe_gain=0.02,
+            ablation_evidence=AblationEvidence(
+                turnover_delta_pct=58.0,
+            ),
+        ),
+        ResearchProposal.create(
+            title=(
+                f"Sobreponderación Contrarian de Reversión a 3 Días de Alta Rotación "
+                f"(Control Empírico #{cycle_ordinal})"
+            ),
+            subsystem=TargetSubsystem.PRESCREEN,
+            source_signals=(sig_tail,),
+            problem_statement=(
+                "Evaluar si perseguir reversiones de precio a 3 días supera la fricción "
+                "de costos de transacción de 10 bps en el panel PIT liquidado."
+            ),
+            mathematical_formulation=(
+                f"Score_{{rev3d,i}} = -(P_{{i,t}} / P_{{i,t-3}} - 1) "
+                f"[ref={sig_tail.watermark_token}, cycle={cycle_ordinal}]"
+            ),
+            falsifiable_hypothesis=(
+                "El tilt de reversión a 3 días genera alfa neto positivo tras costos."
+            ),
+            affected_files=("src/alphalab/cli/commands/autopilot.py",),
+            implementation_todos=("Añadir tilt de reversión de 3 días en pre-screen.",),
+            pit_safe=True,
+            domain_pure=True,
+            llm_numeric_boundary_safe=True,
+            preserves_nofx_guards=True,
+            estimated_loc_delta=35,
+            expected_sharpe_gain=0.07,
+            ablation_evidence=AblationEvidence(
+                baseline_returns=base_d,
+                challenger_returns=chal_d,
+                configuration_matrix_rows=_build_cscv_config_matrix(base_d, chal_d),
+                cost_bps_assumed=10.0,
+                turnover_delta_pct=19.0,
+            ),
+        ),
+    ]
 
 
 def synthesize_proposals_from_signals(
@@ -400,6 +647,7 @@ def synthesize_proposals_from_signals(
             ablation_evidence=AblationEvidence(
                 baseline_returns=base_1,
                 challenger_returns=chal_1,
+                configuration_matrix_rows=_build_cscv_config_matrix(base_1, chal_1),
                 cost_bps_assumed=10.0,
                 turnover_delta_pct=2.5,
                 invariants_verified=(
@@ -468,6 +716,7 @@ def synthesize_proposals_from_signals(
             ablation_evidence=AblationEvidence(
                 baseline_returns=base_2,
                 challenger_returns=chal_2,
+                configuration_matrix_rows=_build_cscv_config_matrix(base_2, chal_2),
                 cost_bps_assumed=10.0,
                 turnover_delta_pct=-8.0,
                 invariants_verified=(
@@ -542,6 +791,7 @@ def synthesize_proposals_from_signals(
             ablation_evidence=AblationEvidence(
                 baseline_returns=base_4,
                 challenger_returns=chal_4,
+                configuration_matrix_rows=_build_cscv_config_matrix(base_4, chal_4),
                 cost_bps_assumed=10.0,
                 turnover_delta_pct=18.0,
             ),
@@ -563,6 +813,17 @@ def synthesize_proposals_from_signals(
                 existing.proposal_id != p.proposal_id for existing in filtered
             ):
                 filtered.append(p)
+    if not filtered:
+        cycle_ordinal = max(1, len(excluded_proposal_ids) // 2 + 1)
+        dynamic = _synthesize_signal_driven_proposals(
+            signals,
+            ablation_panel=ablation_panel,
+            seed=seed,
+            cycle_ordinal=cycle_ordinal,
+        )
+        for p in dynamic:
+            if p.proposal_id not in excluded_proposal_ids:
+                filtered.append(p)
     return tuple(filtered)
 
 
@@ -577,6 +838,7 @@ class AlphaResearchRunner:
         remote_scanner: RemoteGitHubRepoScanner | None = None,
         paper_scanner: AcademicPaperScanner | None = None,
         postmortem_scanner: LivePortfolioPostmortemScanner | None = None,
+        committee_llm: CommitteeDeliberationPort | None = None,
         plans_dir: Path | None = None,
         journal_db_path: Path | None = None,
         execution_db_path: Path | None = None,
@@ -589,6 +851,7 @@ class AlphaResearchRunner:
         self._remote_scanner = remote_scanner
         self._paper_scanner = paper_scanner
         self._postmortem_scanner = postmortem_scanner
+        self._committee_llm = committee_llm
         self._plans_dir = plans_dir
         self._journal_db_path = journal_db_path
         self._execution_db_path = execution_db_path
@@ -596,24 +859,13 @@ class AlphaResearchRunner:
         self._ablation_panel = ablation_panel
         self._seed = seed
 
-    def run_weekly_cycle(
+    def _scan_sources(
         self,
         *,
         as_of: date,
-        sources: Sequence[DiscoverySourceKind] = (
-            DiscoverySourceKind.LOCAL_REPO,
-            DiscoverySourceKind.REMOTE_REPO,
-            DiscoverySourceKind.ACADEMIC_PAPER,
-            DiscoverySourceKind.LIVE_POSTMORTEM,
-        ),
-        ignore_watermarks: bool = False,
-        output_plan_path: Path | None = None,
-    ) -> AlphaResearchRunReport:
-        """Execute one complete weekly discovery + discernment cycle."""
-        started_at = datetime.now(tz=UTC)
-        run_id = f"ar-{as_of.isoformat()}-{uuid.uuid4().hex[:8]}"
-        watermarks = {} if ignore_watermarks else self._store.load_watermarks()
-
+        sources: Sequence[DiscoverySourceKind],
+        watermarks: dict[str, str],
+    ) -> tuple[list[DiscoverySignal], dict[str, str]]:
         signals: list[DiscoverySignal] = []
         new_watermarks: dict[str, str] = {}
 
@@ -645,6 +897,49 @@ class AlphaResearchRunner:
                 )
                 new_watermarks[key] = s.watermark_token
 
+        return signals, new_watermarks
+
+    def run_weekly_cycle(
+        self,
+        *,
+        as_of: date,
+        sources: Sequence[DiscoverySourceKind] = (
+            DiscoverySourceKind.LOCAL_REPO,
+            DiscoverySourceKind.REMOTE_REPO,
+            DiscoverySourceKind.ACADEMIC_PAPER,
+            DiscoverySourceKind.LIVE_POSTMORTEM,
+        ),
+        ignore_watermarks: bool = False,
+        output_plan_path: Path | None = None,
+        progress_callback: Callable[[str], None] | None = None,
+    ) -> AlphaResearchRunReport:
+        """Execute one complete weekly discovery + discernment cycle."""
+        started_at = datetime.now(tz=UTC)
+        run_id = f"ar-{as_of.isoformat()}-{uuid.uuid4().hex[:8]}"
+        watermarks = {} if ignore_watermarks else self._store.load_watermarks()
+
+        if progress_callback is not None:
+            src_names = ", ".join(s.value for s in sources)
+            progress_callback(f"[1/4] Scanning discovery channels ({src_names})...")
+
+        signals, new_watermarks = self._scan_sources(
+            as_of=as_of,
+            sources=sources,
+            watermarks=watermarks,
+        )
+        if not signals and not ignore_watermarks and watermarks:
+            signals, new_watermarks = self._scan_sources(
+                as_of=as_of,
+                sources=sources,
+                watermarks={},
+            )
+
+        if progress_callback is not None:
+            progress_callback(
+                f"[2/4] Loading Point-in-Time empirical ablation panel "
+                f"(observed_at <= {as_of.isoformat()})..."
+            )
+
         panel = self._ablation_panel
         if panel is None and self._journal_db_path is not None:
             panel = load_empirical_ablation_panel(
@@ -668,20 +963,58 @@ class AlphaResearchRunner:
             ablation_panel=panel,
             excluded_proposal_ids=excluded_ids,
         )
+
+        deliberations: dict[int, CommitteeDeliberationNote] = {}
+        if self._committee_llm is not None and proposals:
+            if progress_callback is not None:
+                model_label = getattr(self._committee_llm, "model_name", "ollama")
+                progress_callback(
+                    f"[3/4] Running Role 1 (ScoutProposer) + Role 2 (SkepticReviewer) "
+                    f"LLM deliberation ({model_label}) over {len(signals)} signals "
+                    f"and {len(proposals)} candidate proposals..."
+                )
+            deliberations = self._committee_llm.deliberate(
+                signals=signals,
+                proposals=proposals,
+            )
+
+        if progress_callback is not None:
+            n_samp = len(panel.samples) if panel is not None else 0
+            n_coh = panel.n_cohorts if panel is not None else 0
+            progress_callback(
+                f"[4/4] Running Role 3 (EmpiricalGatekeeper: DSR, T x 8 CSCV/PBO, "
+                f"Politis-Romano bootstrap across {n_samp} settled predictions / "
+                f"{n_coh} PIT cohorts)..."
+            )
+
         n_trials_before = self._store.total_trials_count()
         running_trials = n_trials_before
 
         rng = np.random.default_rng(self._seed)
         decisions: list[CommitteeDecision] = []
-        for prop in proposals:
+        for idx, prop in enumerate(proposals):
+            note = deliberations.get(idx)
+            enriched_prop = (
+                prop.model_copy(
+                    update={
+                        "problem_statement": (
+                            f"{prop.problem_statement} "
+                            f"[ScoutProposer LLM] {note.scout_rationale}"
+                        )
+                    }
+                )
+                if note is not None
+                else prop
+            )
             child_rng = rng.spawn(1)[0]
             decision = judge_proposal(
-                prop,
+                enriched_prop,
                 prior_n_trials=running_trials,
                 rng=child_rng,
                 rejected_proposal_ids=rejected_ids,
                 promoted_proposal_ids=active_promoted_ids,
-                trial_id=f"trial-{run_id}-{prop.proposal_id}",
+                deliberation_note=note,
+                trial_id=f"trial-{run_id}-{enriched_prop.proposal_id}",
             )
             running_trials = decision.empirical_scorecard.n_trials_total
             decisions.append(decision)
